@@ -93,8 +93,10 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
-        } catch {
+        } catch let error as URLError where Self.isOffline(error) {
             throw FerryError.peerOffline(host: peer.host, port: peer.port)
+        } catch {
+            throw FerryError.peerRequestFailed(host: peer.host, port: peer.port, reason: error.localizedDescription)
         }
 
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
@@ -112,5 +114,20 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
             }
         }
         return data
+    }
+
+    private static func isOffline(_ error: URLError) -> Bool {
+        switch error.code {
+        case .cannotFindHost,
+             .cannotConnectToHost,
+             .dnsLookupFailed,
+             .notConnectedToInternet,
+             .internationalRoamingOff,
+             .callIsActive,
+             .dataNotAllowed:
+            return true
+        default:
+            return false
+        }
     }
 }

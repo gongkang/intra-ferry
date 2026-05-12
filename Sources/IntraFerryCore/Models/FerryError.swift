@@ -2,6 +2,7 @@ import Foundation
 
 public enum FerryError: LocalizedError, Equatable {
     case peerOffline(host: String, port: Int)
+    case peerRequestFailed(host: String, port: Int, reason: String)
     case invalidToken
     case unsupportedProtocolVersion(String)
     case pathOutsideAuthorizedRoots(String)
@@ -16,6 +17,8 @@ public enum FerryError: LocalizedError, Equatable {
         switch self {
         case let .peerOffline(host, port):
             return "Peer \(host):\(port) is offline."
+        case let .peerRequestFailed(host, port, reason):
+            return "Request to peer \(host):\(port) failed: \(reason)"
         case .invalidToken:
             return "The shared prototype token is missing or invalid."
         case let .unsupportedProtocolVersion(version):

@@ -42,9 +42,11 @@ final class AppState: ObservableObject {
     let environment: AppEnvironment
     private var peerServiceRuntime: PeerServiceRuntime?
     private var clipboardSyncService: ClipboardSyncService?
+    private var lastTransferFailedBecausePeerOffline = false
 
     var trimmedRemoteSendTarget: String {
-        remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let browsePath = remoteBrowsePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return browsePath.isEmpty ? remotePath.trimmingCharacters(in: .whitespacesAndNewlines) : browsePath
     }
 
     var hasRemoteSendTarget: Bool {
@@ -193,6 +195,10 @@ final class AppState: ObservableObject {
             remoteBrowserStatus = "正在加载..."
             remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: path)
             remotePeerReachability = .online
+            if lastTransferFailedBecausePeerOffline {
+                transferSummary = "远端在线，等待传输"
+                lastTransferFailedBecausePeerOffline = false
+            }
             if remotePath.isEmpty {
                 remotePath = path
             }
@@ -229,27 +235,12 @@ final class AppState: ObservableObject {
         await refreshRemotePath()
     }
 
-    func selectRemoteBrowsePath() {
-        selectRemotePath(normalizedRemoteBrowsePath())
-    }
-
-    func selectRemotePath(_ path: String) {
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPath.isEmpty else {
-            remoteBrowserStatus = "请先刷新并选择对端路径"
-            return
-        }
-
-        remotePath = trimmedPath
-        rememberRecentRemoteTarget(trimmedPath)
-        transferSummary = "发送目标：\(remotePath)"
-    }
-
     func sendDroppedFiles(_ urls: [URL]) async {
         guard let peer = configuration?.peers.first else {
             return
         }
-        guard !remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let destinationPath = trimmedRemoteSendTarget
+        guard !destinationPath.isEmpty else {
             transferSummary = "请先选择发送目标"
             return
         }
@@ -259,12 +250,20 @@ final class AppState: ObservableObject {
                 return
             }
             transferProgress = 0
+            lastTransferFailedBecausePeerOffline = false
             transferSummary = "正在发送 \(urls.count) 个项目"
             let coordinator = TransferCoordinator(planner: TransferPlanner(), client: environment.peerClient)
-            let result = try await coordinator.send(items: urls, destinationPath: remotePath, peer: peer, token: token)
+            let result = try await coordinator.send(items: urls, destinationPath: destinationPath, peer: peer, token: token)
             transferProgress = 1
+            remotePeerReachability = .online
+            remotePath = destinationPath
+            rememberRecentRemoteTarget(destinationPath)
             transferSummary = "已发送到 \(result.finalPath)"
         } catch {
+            if isPeerOffline(error) {
+                remotePeerReachability = .offline
+                lastTransferFailedBecausePeerOffline = true
+            }
             transferSummary = "传输失败：\(userFacingMessage(for: error))"
         }
     }
@@ -327,6 +326,8 @@ final class AppState: ObservableObject {
             switch error {
             case let .peerOffline(host, port):
                 return "对端 \(host):\(port) 离线。"
+            case let .peerRequestFailed(host, port, reason):
+                return "请求对端 \(host):\(port) 失败：\(reason)"
             case .invalidToken:
                 return "共享口令缺失或无效。"
             case let .unsupportedProtocolVersion(version):

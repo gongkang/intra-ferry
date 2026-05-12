@@ -109,4 +109,10 @@ final class PeerModelsTests: XCTestCase {
 
         XCTAssertEqual(error.errorDescription, "Peer task-mac.local:49491 is offline.")
     }
+
+    func testFerryRequestFailureDescriptionKeepsUnderlyingReason() {
+        let error = FerryError.peerRequestFailed(host: "task-mac.local", port: 49491, reason: "The request timed out.")
+
+        XCTAssertEqual(error.errorDescription, "Request to peer task-mac.local:49491 failed: The request timed out.")
+    }
 }

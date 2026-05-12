@@ -40,12 +40,6 @@ struct RemotePathPickerView: View {
             }
             .buttonStyle(.bordered)
             .help("刷新")
-
-            Button("设为目标") {
-                state.selectRemoteBrowsePath()
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(state.remoteBrowsePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(12)
     }

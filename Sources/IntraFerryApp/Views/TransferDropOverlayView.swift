@@ -11,7 +11,7 @@ struct TransferDropOverlayView: View {
                     .font(.system(size: 48, weight: .semibold))
                 Text(targetPath.isEmpty ? "先选择发送目标" : "松开发送")
                     .font(.system(size: 30, weight: .bold))
-                Text(targetPath.isEmpty ? "请先在远端目录中点击“设为目标”" : "发送到 \(targetPath)")
+                Text(targetPath.isEmpty ? "请先在路径输入框中填写远端目录" : "发送到 \(targetPath)")
                     .font(.callout)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
