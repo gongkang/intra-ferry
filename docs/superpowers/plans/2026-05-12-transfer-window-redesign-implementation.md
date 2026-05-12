@@ -144,6 +144,16 @@ At the start of the `do` block, before loading token or paths:
 remotePeerReachability = .checking
 ```
 
+Inside the existing token-missing guard, set the reachability before returning:
+
+```swift
+guard let token = try environment.secretStore.load(for: peer.tokenKey) else {
+    remotePeerReachability = .notConfigured
+    remoteBrowserStatus = "请先保存共享口令"
+    return
+}
+```
+
 Replace the root-loading block with:
 
 ```swift
@@ -182,7 +192,10 @@ Add this private helper near `userFacingMessage(for:)`:
 
 ```swift
 private func isPeerOffline(_ error: Error) -> Bool {
-    if case FerryError.peerOffline = error {
+    guard let ferryError = error as? FerryError else {
+        return false
+    }
+    if case .peerOffline = ferryError {
         return true
     }
     return false
@@ -288,17 +301,33 @@ struct TransferHeaderView: View {
 
 - [ ] **Step 2: Pass settings action into the transfer window**
 
-Change `TransferWindowView` to accept an `openSettings` closure:
+Replace the existing `TransferWindowView` declaration with this version so the new settings action compiles immediately:
 
 ```swift
+import SwiftUI
+
 struct TransferWindowView: View {
     @ObservedObject var state: AppState
     var openSettings: () -> Void
-    ...
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TransferHeaderView(state: state, openSettings: openSettings)
+            RemotePathPickerView(state: state)
+            DropZoneView { urls in
+                Task {
+                    await state.sendDroppedFiles(urls)
+                }
+            }
+            TaskRowView(name: state.transferSummary, progress: state.transferProgress)
+        }
+        .padding()
+        .frame(width: 680, height: 540)
+    }
 }
 ```
 
-In `AppDelegate.showTransferWindow()`, replace the hosting controller assignment with:
+Then in `AppDelegate.showTransferWindow()`, replace the hosting controller assignment with:
 
 ```swift
 window.contentViewController = NSHostingController(
@@ -308,15 +337,9 @@ window.contentViewController = NSHostingController(
 )
 ```
 
-- [ ] **Step 3: Wire the header into the current transfer window body**
+- [ ] **Step 3: Confirm the header is wired**
 
-Temporarily replace the top `Text("传输")` line in `TransferWindowView.body` with:
-
-```swift
-TransferHeaderView(state: state, openSettings: openSettings)
-```
-
-Keep the existing picker, drop zone, and task row in this commit.
+No additional code is needed if Step 2 replaced `TransferWindowView` exactly. Confirm the old top-level `Text("传输")` is gone and `TransferHeaderView(state: state, openSettings: openSettings)` is the first child in the `VStack`.
 
 - [ ] **Step 4: Build**
 
@@ -901,14 +924,24 @@ git commit -m "feat: polish transfer window footer"
 
 - [ ] **Step 1: Update manual testing checklist**
 
-In `docs/manual-testing.md`, replace the old transfer-window drag step with these checks:
+In `docs/manual-testing.md`, replace the single-machine transfer checks at lines 38-41 with:
 
 ```text
-- 打开传输窗口，确认顶部目标电脑为只读文本，右侧显示在线/离线状态和设置按钮。
-- 确认路径栏左侧是上一级按钮，中间是远端路径，右侧是刷新按钮和“设为目标”按钮。
-- 选择远端目录作为发送目标。
-- 从 Finder 拖文件进入传输窗口，确认整个窗口显示“松开发送”覆盖层。
-- 未选择发送目标时拖入文件，确认不会开始传输，并显示“请先选择发送目标”。
+7. 打开传输窗口，确认顶部目标电脑为只读文本，右侧显示在线/离线状态和设置按钮。
+8. 确认路径栏左侧是上一级按钮，中间是远端路径，右侧是刷新按钮和“设为目标”按钮。
+9. 点击 `刷新`，确认对端路径浏览区能加载目录。
+10. 进入一个目录，点击 `设为目标`。
+11. 从 Finder 拖文件进入传输窗口，确认整个窗口显示“松开发送”覆盖层。
+12. 松开鼠标，确认传输完成。
+```
+
+Replace the dual-machine transfer checks at lines 54-56 with:
+
+```text
+10. 在 A 打开传输窗口，刷新并选择 B 的接收目录。
+11. 从 A 拖一个小文件进入传输窗口，确认整个窗口显示“松开发送”，松开后文件出现在 B 的目标目录。
+12. 从 A 拖一个嵌套文件夹进入传输窗口，确认 B 侧目录结构完整。
+13. 关闭再重新打开传输窗口，不选择发送目标时拖入文件，确认不会开始传输，并显示“请先选择发送目标”。
 ```
 
 - [ ] **Step 2: Build and package**
