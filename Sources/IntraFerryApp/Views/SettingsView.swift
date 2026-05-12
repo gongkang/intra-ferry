@@ -5,6 +5,15 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            HStack {
+                Text("本机地址")
+                Text(state.localAddressSummary)
+                    .textSelection(.enabled)
+                    .foregroundStyle(.secondary)
+                Button("刷新") {
+                    state.refreshLocalAddresses()
+                }
+            }
             TextField("本机名称", text: $state.localName)
             TextField("对端地址", text: $state.peerHost)
             TextField("对端端口", text: $state.peerPortText)
@@ -21,6 +30,6 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(width: 460)
+        .frame(width: 560)
     }
 }

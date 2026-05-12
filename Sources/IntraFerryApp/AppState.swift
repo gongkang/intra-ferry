@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SwiftUI
 import IntraFerryCore
 
@@ -26,6 +27,7 @@ final class AppState: ObservableObject {
     @Published var remoteBrowserStatus = "刷新后选择对端目录"
     @Published var settingsStatus = "填写后点击保存"
     @Published var settingsStatusIsError = false
+    @Published var localAddressSummary = "正在检测..."
 
     let environment: AppEnvironment
     private var peerServiceRuntime: PeerServiceRuntime?
@@ -34,9 +36,11 @@ final class AppState: ObservableObject {
     init(environment: AppEnvironment) {
         self.environment = environment
         authorizedReceivePath = Self.defaultAuthorizedReceivePath
+        refreshLocalAddresses()
     }
 
     func loadAndStartServices() {
+        refreshLocalAddresses()
         do {
             let config = try environment.configurationStore.load()
             apply(config)
@@ -55,6 +59,7 @@ final class AppState: ObservableObject {
     }
 
     func saveSettings() {
+        refreshLocalAddresses()
         do {
             settingsStatus = "正在保存..."
             settingsStatusIsError = false
@@ -107,6 +112,11 @@ final class AppState: ObservableObject {
             settingsStatus = connectionStatus
             settingsStatusIsError = true
         }
+    }
+
+    func refreshLocalAddresses() {
+        let addresses = Self.localIPv4Addresses()
+        localAddressSummary = addresses.isEmpty ? "未检测到可用内网 IPv4 地址" : addresses.joined(separator: ", ")
     }
 
     func refreshRemotePath() async {
@@ -281,6 +291,105 @@ final class AppState: ObservableObject {
 
     private static var defaultAuthorizedReceivePath: String {
         FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    private static func localIPv4Addresses() -> [String] {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let interfaces else {
+            return []
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var allAddresses: [(interface: String, address: String)] = []
+        var privateAddresses: [(interface: String, address: String)] = []
+        var cursor: UnsafeMutablePointer<ifaddrs>? = interfaces
+
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+
+            guard let socketAddress = current.pointee.ifa_addr,
+                  Int32(socketAddress.pointee.sa_family) == AF_INET else {
+                continue
+            }
+
+            let name = String(cString: current.pointee.ifa_name)
+            guard isUsableInterface(name: name, flags: current.pointee.ifa_flags),
+                  let address = ipv4Address(from: socketAddress) else {
+                continue
+            }
+
+            let entry = (interface: name, address: address)
+            allAddresses.append(entry)
+            if isPrivateIPv4(address) {
+                privateAddresses.append(entry)
+            }
+        }
+
+        let preferred = privateAddresses.isEmpty ? allAddresses : privateAddresses
+        let sorted = preferred.sorted { lhs, rhs in
+            interfacePriority(lhs.interface) < interfacePriority(rhs.interface)
+        }
+
+        var seen = Set<String>()
+        return sorted.compactMap { entry in
+            guard !seen.contains(entry.address) else {
+                return nil
+            }
+            seen.insert(entry.address)
+            return entry.address
+        }
+    }
+
+    private static func isUsableInterface(name: String, flags: UInt32) -> Bool {
+        let enabled = flags & UInt32(IFF_UP) != 0
+        let running = flags & UInt32(IFF_RUNNING) != 0
+        let loopback = flags & UInt32(IFF_LOOPBACK) != 0
+        let excludedPrefixes = ["lo", "awdl", "llw", "utun", "ipsec", "gif", "stf", "p2p"]
+        let excluded = excludedPrefixes.contains { name.hasPrefix($0) }
+        return enabled && running && !loopback && !excluded
+    }
+
+    private static func ipv4Address(from socketAddress: UnsafePointer<sockaddr>) -> String? {
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            socketAddress,
+            socklen_t(socketAddress.pointee.sa_len),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard result == 0 else {
+            return nil
+        }
+        let bytes = host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func isPrivateIPv4(_ address: String) -> Bool {
+        let parts = address.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else {
+            return false
+        }
+
+        if parts[0] == 10 {
+            return true
+        }
+        if parts[0] == 172 && (16...31).contains(parts[1]) {
+            return true
+        }
+        return parts[0] == 192 && parts[1] == 168
+    }
+
+    private static func interfacePriority(_ name: String) -> Int {
+        if name == "en0" {
+            return 0
+        }
+        if name.hasPrefix("en") {
+            return 1
+        }
+        return 2
     }
 
     private func normalizedRemoteBrowsePath() -> String {
