@@ -3,6 +3,13 @@ import Darwin
 import SwiftUI
 import IntraFerryCore
 
+enum RemotePeerReachability: Equatable {
+    case notConfigured
+    case checking
+    case online
+    case offline
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var configuration: AppConfiguration?
@@ -24,6 +31,9 @@ final class AppState: ObservableObject {
     @Published var remotePath = ""
     @Published var remoteBrowsePath = ""
     @Published var remoteEntries: [RemoteFileEntry] = []
+    @Published var remoteRoots: [AuthorizedRoot] = []
+    @Published var recentRemoteTargets: [String] = []
+    @Published var remotePeerReachability: RemotePeerReachability = .notConfigured
     @Published var remoteBrowserStatus = "刷新后选择对端目录"
     @Published var settingsStatus = "填写后点击保存"
     @Published var settingsStatusIsError = false
@@ -32,6 +42,35 @@ final class AppState: ObservableObject {
     let environment: AppEnvironment
     private var peerServiceRuntime: PeerServiceRuntime?
     private var clipboardSyncService: ClipboardSyncService?
+
+    var trimmedRemoteSendTarget: String {
+        remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var hasRemoteSendTarget: Bool {
+        !trimmedRemoteSendTarget.isEmpty
+    }
+
+    var transferPeerTitle: String {
+        guard let peer = configuration?.peers.first else {
+            return "目标电脑：未配置"
+        }
+
+        return "目标电脑：\(peer.displayName) · \(peer.host):\(peer.port)"
+    }
+
+    var transferPeerStatusText: String {
+        switch remotePeerReachability {
+        case .notConfigured:
+            return "未配置"
+        case .checking:
+            return "检查中"
+        case .online:
+            return "在线"
+        case .offline:
+            return "离线"
+        }
+    }
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -121,38 +160,53 @@ final class AppState: ObservableObject {
 
     func refreshRemotePath() async {
         guard let peer = configuration?.peers.first else {
+            remotePeerReachability = .notConfigured
             remoteBrowserStatus = "请先保存设置"
             return
         }
 
         do {
+            remotePeerReachability = .checking
             guard let token = try environment.secretStore.load(for: peer.tokenKey) else {
+                remotePeerReachability = .notConfigured
                 remoteBrowserStatus = "请先保存共享口令"
                 return
             }
+            if remoteRoots.isEmpty {
+                remoteRoots = try await environment.peerClient.listAuthorizedRoots(peer: peer, token: token)
+            }
+
             var path = normalizedRemoteBrowsePath()
             if path.isEmpty {
                 remoteBrowserStatus = "正在加载对端接收路径..."
-                let roots = try await environment.peerClient.listAuthorizedRoots(peer: peer, token: token)
-                guard let root = roots.first else {
+                guard let root = remoteRoots.first else {
                     remoteEntries = []
+                    remotePeerReachability = .online
                     remoteBrowserStatus = "对端没有配置允许接收路径"
                     return
                 }
                 path = root.path
                 remotePath = root.path
+                rememberRecentRemoteTarget(root.path)
             }
             remoteBrowsePath = path
             remoteBrowserStatus = "正在加载..."
             remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: path)
+            remotePeerReachability = .online
             if remotePath.isEmpty {
                 remotePath = path
             }
             remoteBrowserStatus = remoteEntries.isEmpty ? "当前目录为空" : "已加载 \(remoteEntries.count) 项"
         } catch {
             remoteEntries = []
+            remotePeerReachability = isPeerOffline(error) ? .offline : .online
             remoteBrowserStatus = "浏览失败：\(userFacingMessage(for: error))"
         }
+    }
+
+    func browseRemotePath(_ path: String) async {
+        remoteBrowsePath = path
+        await refreshRemotePath()
     }
 
     func enterRemoteDirectory(_ entry: RemoteFileEntry) async {
@@ -176,13 +230,18 @@ final class AppState: ObservableObject {
     }
 
     func selectRemoteBrowsePath() {
-        let path = normalizedRemoteBrowsePath()
-        guard !path.isEmpty else {
+        selectRemotePath(normalizedRemoteBrowsePath())
+    }
+
+    func selectRemotePath(_ path: String) {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
             remoteBrowserStatus = "请先刷新并选择对端路径"
             return
         }
 
-        remotePath = path
+        remotePath = trimmedPath
+        rememberRecentRemoteTarget(trimmedPath)
         transferSummary = "发送目标：\(remotePath)"
     }
 
@@ -220,6 +279,9 @@ final class AppState: ObservableObject {
         authorizedReceivePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
         remotePath = ""
         remoteBrowsePath = ""
+        remoteRoots = []
+        recentRemoteTargets = []
+        remotePeerReachability = config.peers.isEmpty ? .notConfigured : .checking
         remoteBrowserStatus = "点击刷新加载对端接收路径"
     }
 
@@ -287,6 +349,16 @@ final class AppState: ObservableObject {
         }
 
         return error.localizedDescription
+    }
+
+    private func isPeerOffline(_ error: Error) -> Bool {
+        guard let ferryError = error as? FerryError else {
+            return false
+        }
+        if case .peerOffline = ferryError {
+            return true
+        }
+        return false
     }
 
     private static var defaultAuthorizedReceivePath: String {
@@ -405,6 +477,14 @@ final class AppState: ObservableObject {
 
         let parent = URL(fileURLWithPath: standardizedPath).deletingLastPathComponent().path
         return parent.isEmpty ? "/" : parent
+    }
+
+    private func rememberRecentRemoteTarget(_ path: String) {
+        recentRemoteTargets.removeAll { $0 == path }
+        recentRemoteTargets.insert(path, at: 0)
+        if recentRemoteTargets.count > 5 {
+            recentRemoteTargets = Array(recentRemoteTargets.prefix(5))
+        }
     }
 
     private func validateSettings() throws -> ValidatedSettings {
