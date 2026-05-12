@@ -1,34 +1,15 @@
-import SwiftUI
+import Foundation
 import UniformTypeIdentifiers
 
-struct DropZoneView: View {
-    var onDropURLs: ([URL]) -> Void
-    @State private var isTargeted = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .strokeBorder(
-                isTargeted ? Color.accentColor : Color.secondary,
-                style: StrokeStyle(lineWidth: 2, dash: [8])
-            )
-            .overlay(Text("把文件或文件夹拖到这里"))
-            .frame(height: 160)
-            .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
-                loadURLs(from: providers) { urls in
-                    onDropURLs(urls)
-                }
-                return true
-            }
-    }
-
-    private func loadURLs(from providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
+enum FileDropLoader {
+    static func loadURLs(from providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
         let group = DispatchGroup()
         let accumulator = URLAccumulator()
 
         for provider in providers {
             group.enter()
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                if let url = Self.url(from: item) {
+                if let url = url(from: item) {
                     accumulator.append(url)
                 }
                 group.leave()

@@ -7,16 +7,36 @@ struct TransferWindowView: View {
     @State private var isDropTargeted = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            TransferHeaderView(state: state, openSettings: openSettings)
-            Divider()
-            HStack(spacing: 0) {
-                TransferSidebarView(state: state)
+        ZStack {
+            VStack(spacing: 0) {
+                TransferHeaderView(state: state, openSettings: openSettings)
                 Divider()
-                RemotePathPickerView(state: state)
+                HStack(spacing: 0) {
+                    TransferSidebarView(state: state)
+                    Divider()
+                    RemotePathPickerView(state: state)
+                }
+                TransferFooterView(state: state)
             }
-            TransferFooterView(state: state)
+
+            if isDropTargeted {
+                TransferDropOverlayView(targetPath: state.trimmedRemoteSendTarget)
+            }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
+            guard state.hasRemoteSendTarget else {
+                state.transferSummary = "请先选择发送目标"
+                return true
+            }
+
+            FileDropLoader.loadURLs(from: providers) { urls in
+                Task {
+                    await state.sendDroppedFiles(urls)
+                }
+            }
+            return true
+        }
     }
 }
