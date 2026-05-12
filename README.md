@@ -24,3 +24,7 @@ Build a local macOS app bundle:
 scripts/package-macos-app.sh
 open build/IntraFerry.app
 ```
+
+## Manual Testing
+
+See `docs/manual-testing.md` for the two-Mac acceptance checklist.
