@@ -1,25 +1,68 @@
-# Intra Ferry Manual Testing
+# 内渡手工测试清单
 
-## Local Build
+内渡是 Intra Ferry 的中文名。本文用于本地和双机验收测试。
+
+## 本地构建
+
+```bash
+swift build
+scripts/package-macos-app.sh
+open build/IntraFerry.app
+```
+
+如果本机安装了完整 Xcode，可以补充运行：
 
 ```bash
 swift test
-swift build
-scripts/package-macos-app.sh
 ```
 
-## Two-Mac Acceptance
+仅安装 Command Line Tools 时，`swift test` 可能因缺少 XCTest 失败。
 
-1. Install or run Intra Ferry on both Macs.
-2. Configure each Mac with the other Mac's host, port, and shared token.
-3. Add one authorized receive location on each Mac.
-4. Verify the peer state changes from offline to online.
-5. Send a small file to the selected remote path.
-6. Send a nested folder to the selected remote path.
-7. Send a multi-GB file and verify progress remains visible.
-8. Disconnect network during transfer, reconnect, and retry.
-9. Copy text on Mac A and paste it on Mac B.
-10. Copy an image on Mac A and paste it on Mac B.
-11. Copy a file in Finder on Mac A and paste the cached copy on Mac B.
-12. Pause clipboard sync and verify Mac B's pasteboard does not change.
-13. Send a request with an invalid token and verify directory listing, chunk upload, and clipboard write are rejected.
+## 单机冒烟测试
+
+1. 启动 `build/IntraFerry.app`。
+2. 点击菜单栏 `Ferry`，确认弹窗在其他窗口上方。
+3. 打开 `设置`。
+4. 填写：
+
+```text
+本机名称：日常电脑
+对端地址：127.0.0.1
+对端端口：49491
+共享口令：test-token
+允许接收路径：/Users/你的用户名
+```
+
+5. 点击 `保存`，确认设置窗口显示保存成功。
+6. 关闭设置窗口，再次打开设置窗口，确认 app 不退出。
+7. 打开传输窗口。
+8. 点击 `刷新`，确认对端路径浏览区能加载目录。
+9. 进入一个目录，点击 `选择当前路径`。
+10. 拖入一个小文件，确认传输完成。
+
+## 双机验收
+
+1. 在两台 Mac 上 clone 项目并打包启动 app。
+2. 确认两台 Mac 在同一可信局域网内。
+3. 分别用 `ipconfig getifaddr en0` 获取 Wi-Fi IP。
+4. 两台 Mac 都打开 `设置`。
+5. A 的 `对端地址` 填 B 的 IP，B 的 `对端地址` 填 A 的 IP。
+6. 两台 Mac 的 `对端端口` 都填 `49491`。
+7. 两台 Mac 的 `共享口令` 填同一个值。
+8. 两台 Mac 的 `允许接收路径` 填本机希望开放给对端的目录。
+9. 两台 Mac 分别点击 `保存`，确认都显示正在监听端口 `49491`。
+10. 在 A 打开传输窗口，刷新并选择 B 的接收目录。
+11. 从 A 拖一个小文件到传输区，确认文件出现在 B 的目标目录。
+12. 从 A 拖一个嵌套文件夹到传输区，确认 B 侧目录结构完整。
+13. 从 B 反向传一个文件到 A。
+14. 在 A 复制文本，在 B 粘贴，确认剪贴板同步。
+15. 在 A 复制图片，在 B 粘贴，确认剪贴板同步。
+16. 在 A Finder 里复制文件，在 B 粘贴，确认文件剪贴板同步。
+17. 关闭剪贴板同步，确认另一台 Mac 的剪贴板不再自动变化。
+18. 故意把一台 Mac 的共享口令改错，确认目录浏览和传输失败。
+
+## 已知限制
+
+- 当前版本使用手动 IP 配置，没有 Bonjour 自动发现。
+- 当前版本使用本地 `secrets.json` 存共享口令，方便开发调试；正式发布前应切回 Keychain 或更严格的凭据存储。
+- 当前传输体验以原型验证为主，超大文件、断网恢复和权限异常仍需要更多实机测试。

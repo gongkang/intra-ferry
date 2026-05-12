@@ -1,5 +1,33 @@
-.superpowers/
-.worktrees
-.worktrees/
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SwiftPM
 .build/
+.swiftpm/
+
+# Xcode / IDE
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Local packaging
 build/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Local agent/worktree state
+.superpowers/
+.worktrees/
+.worktrees
+
+# Local environment files
+.env
+.env.*
