@@ -10,11 +10,11 @@ final class AppState: ObservableObject {
             clipboardSyncEnabled ? clipboardSyncService?.start() : clipboardSyncService?.stop()
         }
     }
-    @Published var connectionStatus = "Not configured"
-    @Published var latestClipboardStatus = "No clipboard sync yet"
-    @Published var transferSummary = "No active transfers"
+    @Published var connectionStatus = "尚未配置"
+    @Published var latestClipboardStatus = "还没有同步剪贴板"
+    @Published var transferSummary = "没有正在传输的任务"
     @Published var transferProgress = 0.0
-    @Published var localName = "Daily Mac"
+    @Published var localName = "日常电脑"
     @Published var peerHost = ""
     @Published var peerPort = 49491
     @Published var sharedToken = ""
@@ -40,7 +40,7 @@ final class AppState: ObservableObject {
                 try startPeerServices(config: config, peer: peer, token: token)
             }
         } catch {
-            connectionStatus = "Not configured"
+            connectionStatus = "尚未配置"
         }
     }
 
@@ -53,14 +53,14 @@ final class AppState: ObservableObject {
             )
             let peer = try PeerConfig(
                 id: configuration?.peers.first?.id ?? UUID(),
-                displayName: "Peer",
+                displayName: "对端",
                 host: peerHost,
                 port: peerPort,
                 tokenKey: "peer.default",
                 localDeviceName: localName
             )
             let roots = authorizedReceivePath.isEmpty ? [] : [
-                AuthorizedRoot(id: configuration?.authorizedRoots.first?.id ?? UUID(), displayName: "Receive", path: authorizedReceivePath)
+                AuthorizedRoot(id: configuration?.authorizedRoots.first?.id ?? UUID(), displayName: "接收目录", path: authorizedReceivePath)
             ]
             let staging = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("IntraFerry", isDirectory: true)
@@ -78,9 +78,9 @@ final class AppState: ObservableObject {
             try environment.secretStore.save(token, for: peer.tokenKey)
             apply(config)
             try startPeerServices(config: config, peer: peer, token: token)
-            connectionStatus = "Saved settings"
+            connectionStatus = "设置已保存"
         } catch {
-            connectionStatus = "Save failed: \(error.localizedDescription)"
+            connectionStatus = "保存失败：\(userFacingMessage(for: error))"
         }
     }
 
@@ -95,7 +95,7 @@ final class AppState: ObservableObject {
             }
             remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: remotePath)
         } catch {
-            transferSummary = "Remote browse failed: \(error.localizedDescription)"
+            transferSummary = "浏览对端目录失败：\(userFacingMessage(for: error))"
         }
     }
 
@@ -109,13 +109,13 @@ final class AppState: ObservableObject {
                 return
             }
             transferProgress = 0
-            transferSummary = "Sending \(urls.count) item(s)"
+            transferSummary = "正在发送 \(urls.count) 个项目"
             let coordinator = TransferCoordinator(planner: TransferPlanner(), client: environment.peerClient)
             let result = try await coordinator.send(items: urls, destinationPath: remotePath, peer: peer, token: token)
             transferProgress = 1
-            transferSummary = "Sent to \(result.finalPath)"
+            transferSummary = "已发送到 \(result.finalPath)"
         } catch {
-            transferSummary = "Transfer failed: \(error.localizedDescription)"
+            transferSummary = "传输失败：\(userFacingMessage(for: error))"
         }
     }
 
@@ -137,7 +137,7 @@ final class AppState: ObservableObject {
         try runtime.start()
         peerServiceRuntime = runtime
         startClipboardSync(peer: peer, token: token, config: config)
-        connectionStatus = "Listening on port \(config.localDevice.servicePort)"
+        connectionStatus = "正在监听端口 \(config.localDevice.servicePort)"
     }
 
     private func startClipboardSync(peer: PeerConfig, token: AuthToken, config: AppConfiguration) {
@@ -151,5 +151,47 @@ final class AppState: ObservableObject {
             sync.start()
         }
         clipboardSyncService = sync
+    }
+
+    private func userFacingMessage(for error: Error) -> String {
+        if let error = error as? PeerConfig.ValidationError {
+            switch error {
+            case .emptyHost:
+                return "对端地址不能为空。"
+            case let .whitespaceInHost(host):
+                return "对端地址 \(host) 不能包含空格。"
+            case let .invalidPort(port):
+                return "对端端口 \(port) 必须在 1 到 65535 之间。"
+            case let .invalidURL(host, port):
+                return "对端地址 \(host) 和端口 \(port) 不能组成有效的 HTTP 地址。"
+            }
+        }
+
+        if let error = error as? FerryError {
+            switch error {
+            case let .peerOffline(host, port):
+                return "对端 \(host):\(port) 离线。"
+            case .invalidToken:
+                return "共享口令缺失或无效。"
+            case let .unsupportedProtocolVersion(version):
+                return "不支持协议版本 \(version)。"
+            case let .pathOutsideAuthorizedRoots(path):
+                return "路径 \(path) 不在允许接收路径内。"
+            case let .pathMissing(path):
+                return "路径 \(path) 不存在。"
+            case let .permissionDenied(path):
+                return "没有访问 \(path) 的权限。"
+            case let .diskFull(requiredBytes, availableBytes):
+                return "磁盘空间不足。需要 \(requiredBytes) 字节，可用 \(availableBytes) 字节。"
+            case let .transferIncomplete(id):
+                return "传输 \(id.uuidString) 尚未完成。"
+            case .clipboardSerializationFailed:
+                return "剪贴板内容无法同步。"
+            case .clipboardWriteFailed:
+                return "写入剪贴板失败。"
+            }
+        }
+
+        return error.localizedDescription
     }
 }

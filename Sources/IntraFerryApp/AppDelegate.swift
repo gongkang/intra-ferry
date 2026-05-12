@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var transferWindow: NSWindow?
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         state.loadAndStartServices()
@@ -35,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = NSHostingController(
             rootView: MenuBarContentView(state: state, openTransferWindow: { [weak self] in
                 self?.showTransferWindow()
+            }, openSettings: { [weak self] in
+                self?.showSettingsWindow()
             })
         )
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -42,7 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showTransferWindow() {
+        popover?.performClose(nil)
         if let transferWindow {
+            NSApp.activate(ignoringOtherApps: true)
             transferWindow.makeKeyAndOrderFront(nil)
             return
         }
@@ -53,10 +58,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Intra Ferry Transfer"
+        window.title = "Ferry 传输"
         window.contentViewController = NSHostingController(rootView: TransferWindowView(state: state))
         window.center()
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         transferWindow = window
+    }
+
+    private func showSettingsWindow() {
+        popover?.performClose(nil)
+        if let settingsWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            settingsWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 280),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Ferry 设置"
+        window.contentViewController = NSHostingController(rootView: SettingsView(state: state))
+        window.center()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        settingsWindow = window
     }
 }

@@ -11,7 +11,7 @@ struct DropZoneView: View {
                 isTargeted ? Color.accentColor : Color.secondary,
                 style: StrokeStyle(lineWidth: 2, dash: [8])
             )
-            .overlay(Text("Drop files or folders here"))
+            .overlay(Text("把文件或文件夹拖到这里"))
             .frame(height: 160)
             .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
                 loadURLs(from: providers) { urls in

@@ -5,7 +5,7 @@ struct TransferWindowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Transfer")
+            Text("传输")
                 .font(.title2)
             RemotePathPickerView(state: state)
             DropZoneView { urls in
