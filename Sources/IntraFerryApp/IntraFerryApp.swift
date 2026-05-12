@@ -6,7 +6,7 @@ struct IntraFerryApplication: App {
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            SettingsView(state: appDelegate.state)
         }
     }
 }
