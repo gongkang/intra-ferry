@@ -3,7 +3,7 @@ import SwiftUI
 import IntraFerryCore
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = AppState(environment: AppEnvironment.production())
 
     private var statusItem: NSStatusItem?
@@ -76,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.title = "Ferry 传输"
         window.contentViewController = NSHostingController(rootView: TransferWindowView(state: state))
         window.center()
@@ -98,11 +100,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.title = "Ferry 设置"
         window.contentViewController = NSHostingController(rootView: SettingsView(state: state))
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         settingsWindow = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else {
+            return
+        }
+
+        if window === settingsWindow {
+            settingsWindow = nil
+        } else if window === transferWindow {
+            transferWindow = nil
+        }
     }
 }
