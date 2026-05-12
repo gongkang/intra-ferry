@@ -30,6 +30,8 @@ final class AppState: ObservableObject {
 
     init(environment: AppEnvironment) {
         self.environment = environment
+        authorizedReceivePath = Self.defaultAuthorizedReceivePath
+        remotePath = Self.defaultAuthorizedReceivePath
     }
 
     func loadAndStartServices() {
@@ -67,8 +69,11 @@ final class AppState: ObservableObject {
                 tokenKey: "peer.default",
                 localDeviceName: localName
             )
-            let roots = authorizedReceivePath.isEmpty ? [] : [
-                AuthorizedRoot(id: configuration?.authorizedRoots.first?.id ?? UUID(), displayName: "接收目录", path: authorizedReceivePath)
+            let receivePath = normalizedReceivePath()
+            try FileManager.default.createDirectory(atPath: receivePath, withIntermediateDirectories: true)
+            authorizedReceivePath = receivePath
+            let roots = [
+                AuthorizedRoot(id: configuration?.authorizedRoots.first?.id ?? UUID(), displayName: "接收目录", path: receivePath)
             ]
             let staging = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("IntraFerry", isDirectory: true)
@@ -137,8 +142,8 @@ final class AppState: ObservableObject {
         localName = config.localDevice.displayName
         peerHost = config.peers.first?.host ?? ""
         peerPort = config.peers.first?.port ?? 49491
-        authorizedReceivePath = config.authorizedRoots.first?.path ?? ""
-        remotePath = config.authorizedRoots.first?.path ?? remotePath
+        authorizedReceivePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
+        remotePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
     }
 
     private func startPeerServices(config: AppConfiguration, peer: PeerConfig, token: AuthToken) throws {
@@ -205,5 +210,14 @@ final class AppState: ObservableObject {
         }
 
         return error.localizedDescription
+    }
+
+    private static var defaultAuthorizedReceivePath: String {
+        FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    private func normalizedReceivePath() -> String {
+        let trimmedPath = authorizedReceivePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedPath.isEmpty ? Self.defaultAuthorizedReceivePath : trimmedPath
     }
 }
