@@ -79,7 +79,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.title = "Ferry 传输"
-        window.contentViewController = NSHostingController(rootView: TransferWindowView(state: state))
+        window.contentViewController = NSHostingController(
+            rootView: TransferWindowView(state: state, openSettings: { [weak self] in
+                self?.showSettingsWindow()
+            })
+        )
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)

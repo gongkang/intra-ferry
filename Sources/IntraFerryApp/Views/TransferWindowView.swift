@@ -2,11 +2,11 @@ import SwiftUI
 
 struct TransferWindowView: View {
     @ObservedObject var state: AppState
+    var openSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("传输")
-                .font(.title2)
+            TransferHeaderView(state: state, openSettings: openSettings)
             RemotePathPickerView(state: state)
             DropZoneView { urls in
                 Task {
