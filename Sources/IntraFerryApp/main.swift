@@ -1,3 +1,3 @@
-import IntraFerryCore
+import SwiftUI
 
-print("Intra Ferry protocol \(IntraFerryCore.protocolVersion)")
+IntraFerryApplication.main()
