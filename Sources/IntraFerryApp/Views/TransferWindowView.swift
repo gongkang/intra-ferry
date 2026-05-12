@@ -1,21 +1,22 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TransferWindowView: View {
     @ObservedObject var state: AppState
     var openSettings: () -> Void
+    @State private var isDropTargeted = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 0) {
             TransferHeaderView(state: state, openSettings: openSettings)
-            RemotePathPickerView(state: state)
-            DropZoneView { urls in
-                Task {
-                    await state.sendDroppedFiles(urls)
-                }
+            Divider()
+            HStack(spacing: 0) {
+                TransferSidebarView(state: state)
+                Divider()
+                RemotePathPickerView(state: state)
             }
-            TaskRowView(name: state.transferSummary, progress: state.transferProgress)
+            TransferFooterView(state: state)
         }
-        .padding()
-        .frame(width: 680, height: 540)
+        .frame(minWidth: 760, minHeight: 520)
     }
 }

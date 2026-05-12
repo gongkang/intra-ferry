@@ -607,7 +607,7 @@ struct TransferFooterView: View {
             HStack(spacing: 12) {
                 Text(state.hasRemoteSendTarget ? "发送目标：\(state.trimmedRemoteSendTarget)" : "发送目标：未选择")
                     .font(.caption)
-                    .foregroundStyle(state.hasRemoteSendTarget ? .secondary : .orange)
+                    .foregroundStyle(state.hasRemoteSendTarget ? Color.secondary : Color.orange)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
