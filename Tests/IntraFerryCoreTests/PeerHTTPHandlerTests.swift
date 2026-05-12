@@ -63,4 +63,43 @@ final class PeerHTTPHandlerTests: XCTestCase {
         XCTAssertEqual(response.statusCode, 200)
         XCTAssertEqual(entries.map(\.name), ["ok.txt"])
     }
+
+    func testClipboardRouteAppliesEnvelope() async throws {
+        let pasteboard = FakePasteboardClient()
+        let localDevice = UUID()
+        let router = PeerRouter(
+            localDeviceId: localDevice,
+            expectedToken: AuthToken(rawValue: "secret"),
+            browser: LocalRemoteFileBrowser(pathService: AuthorizedPathService(roots: [])),
+            receiver: nil,
+            clipboard: ClipboardService(
+                localDeviceId: localDevice,
+                pasteboard: pasteboard,
+                serializer: ClipboardSerializer(localDeviceId: localDevice)
+            )
+        )
+        let handler = PeerHTTPHandler(router: router)
+        let envelope = ClipboardEnvelope(
+            id: UUID(),
+            sourceDeviceId: UUID(),
+            kind: .text,
+            items: [ClipboardItem(typeIdentifier: "public.utf8-plain-text", data: Data("remote".utf8))],
+            createdAt: Date()
+        )
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/clipboard",
+            headers: [
+                "X-Intra-Ferry-Protocol": "1",
+                "X-Intra-Ferry-Device-Id": UUID().uuidString,
+                "X-Intra-Ferry-Token": "secret"
+            ],
+            body: try JSONEncoder().encode(envelope)
+        )
+
+        let response = await handler.handle(request)
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(pasteboard.items, envelope.items)
+    }
 }

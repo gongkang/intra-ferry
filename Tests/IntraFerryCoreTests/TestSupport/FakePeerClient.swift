@@ -5,6 +5,7 @@ final actor FakePeerClient: PeerClient {
     var prepared: TransferManifest?
     var uploadedChunks: [ChunkDescriptor: Data] = [:]
     var finalized: UUID?
+    var sentClipboard: ClipboardEnvelope?
 
     func listDirectory(peer: PeerConfig, token: AuthToken, path: String) async throws -> [RemoteFileEntry] {
         []
@@ -28,5 +29,9 @@ final actor FakePeerClient: PeerClient {
     func finalizeTransfer(peer: PeerConfig, token: AuthToken, transferId: UUID) async throws -> String {
         finalized = transferId
         return "/Users/task/inbox"
+    }
+
+    func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws {
+        sentClipboard = envelope
     }
 }

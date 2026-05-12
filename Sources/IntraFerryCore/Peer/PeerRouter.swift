@@ -5,17 +5,20 @@ public final class PeerRouter: @unchecked Sendable {
     private let expectedToken: AuthToken
     private let browser: RemoteFileBrowsing
     private let receiver: FileTransferReceiver?
+    private let clipboard: ClipboardService?
 
     public init(
         localDeviceId: UUID,
         expectedToken: AuthToken,
         browser: RemoteFileBrowsing,
-        receiver: FileTransferReceiver?
+        receiver: FileTransferReceiver?,
+        clipboard: ClipboardService? = nil
     ) {
         self.localDeviceId = localDeviceId
         self.expectedToken = expectedToken
         self.browser = browser
         self.receiver = receiver
+        self.clipboard = clipboard
     }
 
     public func authenticate(_ request: PeerRequest) throws {
@@ -45,5 +48,10 @@ public final class PeerRouter: @unchecked Sendable {
     public func finalizeTransfer(transferId: UUID, request: PeerRequest) throws -> URL? {
         try authenticate(request)
         return try receiver?.finalize(transferId: transferId)
+    }
+
+    public func applyClipboard(_ envelope: ClipboardEnvelope, request: PeerRequest) throws {
+        try authenticate(request)
+        try clipboard?.applyRemoteEnvelope(envelope)
     }
 }

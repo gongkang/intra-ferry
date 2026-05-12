@@ -41,6 +41,11 @@ public final class PeerHTTPHandler: @unchecked Sendable {
                     body: Data((finalURL?.path ?? "").utf8)
                 )
 
+            case ("POST", "/clipboard"):
+                let envelope = try JSONDecoder().decode(ClipboardEnvelope.self, from: request.body)
+                try router.applyClipboard(envelope, request: peerRequest)
+                return HTTPResponse(statusCode: 200, headers: [:], body: Data())
+
             default:
                 return HTTPResponse(statusCode: 404, headers: [:], body: Data("Not found".utf8))
             }

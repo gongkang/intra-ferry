@@ -55,6 +55,17 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
+    public func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws {
+        let body = try JSONEncoder().encode(envelope)
+        _ = try await data(
+            for: peer.baseURL.appendingPathComponent("clipboard"),
+            peer: peer,
+            token: token,
+            method: "POST",
+            body: body
+        )
+    }
+
     private func data(for url: URL, peer: PeerConfig, token: AuthToken, method: String, body: Data?) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = method
