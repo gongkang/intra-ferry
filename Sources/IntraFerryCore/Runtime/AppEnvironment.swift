@@ -24,7 +24,7 @@ public struct AppEnvironment: Sendable {
 
         return AppEnvironment(
             configurationStore: FileConfigurationStore(fileURL: support.appendingPathComponent("config.json")),
-            secretStore: KeychainSecretStore(),
+            secretStore: FileSecretStore(fileURL: support.appendingPathComponent("secrets.json")),
             peerClient: URLSessionPeerClient(),
             pasteboard: NSPasteboardClient()
         )

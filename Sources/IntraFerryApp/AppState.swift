@@ -21,6 +21,8 @@ final class AppState: ObservableObject {
     @Published var authorizedReceivePath = ""
     @Published var remotePath = ""
     @Published var remoteEntries: [RemoteFileEntry] = []
+    @Published var settingsStatus = "填写后点击保存"
+    @Published var settingsStatusIsError = false
 
     let environment: AppEnvironment
     private var peerServiceRuntime: PeerServiceRuntime?
@@ -38,14 +40,20 @@ final class AppState: ObservableObject {
                let token = try environment.secretStore.load(for: peer.tokenKey) {
                 sharedToken = token.rawValue
                 try startPeerServices(config: config, peer: peer, token: token)
+                settingsStatus = "已加载现有设置"
+                settingsStatusIsError = false
             }
         } catch {
             connectionStatus = "尚未配置"
+            settingsStatus = "尚未保存设置"
+            settingsStatusIsError = false
         }
     }
 
     func saveSettings() {
         do {
+            settingsStatus = "正在保存..."
+            settingsStatusIsError = false
             let local = LocalDeviceConfig(
                 id: configuration?.localDevice.id ?? UUID(),
                 displayName: localName,
@@ -79,8 +87,12 @@ final class AppState: ObservableObject {
             apply(config)
             try startPeerServices(config: config, peer: peer, token: token)
             connectionStatus = "设置已保存"
+            settingsStatus = "已保存，服务正在监听端口 \(config.localDevice.servicePort)"
+            settingsStatusIsError = false
         } catch {
             connectionStatus = "保存失败：\(userFacingMessage(for: error))"
+            settingsStatus = connectionStatus
+            settingsStatusIsError = true
         }
     }
 
