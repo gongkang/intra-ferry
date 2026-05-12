@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.showSettingsWindow()
             })
         )
+        window.setContentSize(NSSize(width: 820, height: 560))
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
