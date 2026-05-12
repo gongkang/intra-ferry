@@ -43,7 +43,7 @@ struct TransferSidebarView: View {
         }
         .padding(12)
         .frame(width: 180)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     private func sectionTitle(_ value: String) -> some View {
