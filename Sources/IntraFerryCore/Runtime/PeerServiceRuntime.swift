@@ -18,6 +18,7 @@ public final class PeerServiceRuntime: @unchecked Sendable {
         let router = PeerRouter(
             localDeviceId: configuration.localDevice.id,
             expectedToken: token,
+            authorizedRoots: configuration.authorizedRoots,
             browser: LocalRemoteFileBrowser(pathService: pathService),
             receiver: receiver,
             clipboard: clipboard

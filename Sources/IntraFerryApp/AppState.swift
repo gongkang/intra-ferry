@@ -34,8 +34,6 @@ final class AppState: ObservableObject {
     init(environment: AppEnvironment) {
         self.environment = environment
         authorizedReceivePath = Self.defaultAuthorizedReceivePath
-        remotePath = Self.defaultAuthorizedReceivePath
-        remoteBrowsePath = Self.defaultAuthorizedReceivePath
     }
 
     func loadAndStartServices() {
@@ -122,10 +120,24 @@ final class AppState: ObservableObject {
                 remoteBrowserStatus = "请先保存共享口令"
                 return
             }
-            let path = normalizedRemoteBrowsePath()
+            var path = normalizedRemoteBrowsePath()
+            if path.isEmpty {
+                remoteBrowserStatus = "正在加载对端接收路径..."
+                let roots = try await environment.peerClient.listAuthorizedRoots(peer: peer, token: token)
+                guard let root = roots.first else {
+                    remoteEntries = []
+                    remoteBrowserStatus = "对端没有配置允许接收路径"
+                    return
+                }
+                path = root.path
+                remotePath = root.path
+            }
             remoteBrowsePath = path
             remoteBrowserStatus = "正在加载..."
             remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: path)
+            if remotePath.isEmpty {
+                remotePath = path
+            }
             remoteBrowserStatus = remoteEntries.isEmpty ? "当前目录为空" : "已加载 \(remoteEntries.count) 项"
         } catch {
             remoteEntries = []
@@ -143,17 +155,33 @@ final class AppState: ObservableObject {
     }
 
     func browseRemoteParent() async {
-        remoteBrowsePath = parentPath(for: normalizedRemoteBrowsePath())
+        let path = normalizedRemoteBrowsePath()
+        guard !path.isEmpty else {
+            await refreshRemotePath()
+            return
+        }
+
+        remoteBrowsePath = parentPath(for: path)
         await refreshRemotePath()
     }
 
     func selectRemoteBrowsePath() {
-        remotePath = normalizedRemoteBrowsePath()
+        let path = normalizedRemoteBrowsePath()
+        guard !path.isEmpty else {
+            remoteBrowserStatus = "请先刷新并选择对端路径"
+            return
+        }
+
+        remotePath = path
         transferSummary = "发送目标：\(remotePath)"
     }
 
     func sendDroppedFiles(_ urls: [URL]) async {
         guard let peer = configuration?.peers.first else {
+            return
+        }
+        guard !remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            transferSummary = "请先选择发送目标"
             return
         }
 
@@ -180,8 +208,9 @@ final class AppState: ObservableObject {
         peerPort = config.peers.first?.port ?? 49491
         peerPortText = String(peerPort)
         authorizedReceivePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
-        remotePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
-        remoteBrowsePath = remotePath
+        remotePath = ""
+        remoteBrowsePath = ""
+        remoteBrowserStatus = "点击刷新加载对端接收路径"
     }
 
     private func startPeerServices(config: AppConfiguration, peer: PeerConfig, token: AuthToken) throws {
@@ -256,7 +285,7 @@ final class AppState: ObservableObject {
 
     private func normalizedRemoteBrowsePath() -> String {
         let trimmedPath = remoteBrowsePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedPath.isEmpty ? remotePath : trimmedPath
+        return trimmedPath.isEmpty ? remotePath.trimmingCharacters(in: .whitespacesAndNewlines) : trimmedPath
     }
 
     private func parentPath(for path: String) -> String {

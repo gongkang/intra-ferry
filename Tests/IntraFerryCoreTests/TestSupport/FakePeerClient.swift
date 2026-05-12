@@ -7,6 +7,10 @@ final actor FakePeerClient: PeerClient {
     var finalized: UUID?
     var sentClipboard: ClipboardEnvelope?
 
+    func listAuthorizedRoots(peer: PeerConfig, token: AuthToken) async throws -> [AuthorizedRoot] {
+        []
+    }
+
     func listDirectory(peer: PeerConfig, token: AuthToken, path: String) async throws -> [RemoteFileEntry] {
         []
     }

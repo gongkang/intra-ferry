@@ -11,6 +11,10 @@ public final class PeerHTTPHandler: @unchecked Sendable {
         do {
             let peerRequest = try peerRequest(from: request)
             switch (request.method, pathOnly(request.path)) {
+            case ("GET", "/roots"):
+                let roots = try router.listAuthorizedRoots(request: peerRequest)
+                return try json(roots)
+
             case ("GET", "/directories"):
                 let path = try queryValue("path", in: request.path)
                 let entries = try router.listDirectory(path: path, request: peerRequest)
@@ -51,6 +55,12 @@ public final class PeerHTTPHandler: @unchecked Sendable {
             }
         } catch FerryError.invalidToken {
             return HTTPResponse(statusCode: 401, headers: [:], body: Data("Invalid token".utf8))
+        } catch let FerryError.pathOutsideAuthorizedRoots(path) {
+            return HTTPResponse(statusCode: 403, headers: [:], body: Data(path.utf8))
+        } catch let FerryError.permissionDenied(path) {
+            return HTTPResponse(statusCode: 403, headers: [:], body: Data(path.utf8))
+        } catch let FerryError.pathMissing(path) {
+            return HTTPResponse(statusCode: 404, headers: [:], body: Data(path.utf8))
         } catch {
             return HTTPResponse(statusCode: 400, headers: [:], body: Data(String(describing: error).utf8))
         }

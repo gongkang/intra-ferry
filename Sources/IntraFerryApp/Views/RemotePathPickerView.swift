@@ -5,7 +5,7 @@ struct RemotePathPickerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("发送目标：\(state.remotePath)")
+            Text("发送目标：\(state.remotePath.isEmpty ? "未选择" : state.remotePath)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
@@ -60,6 +60,11 @@ struct RemotePathPickerView: View {
                     .disabled(!entry.isDirectory)
                 }
                 .frame(height: 170)
+            }
+        }
+        .task {
+            if state.remotePath.isEmpty && state.remoteBrowsePath.isEmpty {
+                await state.refreshRemotePath()
             }
         }
     }

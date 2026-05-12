@@ -10,6 +10,17 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
         self.session = session
     }
 
+    public func listAuthorizedRoots(peer: PeerConfig, token: AuthToken) async throws -> [AuthorizedRoot] {
+        let data = try await data(
+            for: peer.baseURL.appendingPathComponent("roots"),
+            peer: peer,
+            token: token,
+            method: "GET",
+            body: nil
+        )
+        return try JSONDecoder().decode([AuthorizedRoot].self, from: data)
+    }
+
     public func listDirectory(peer: PeerConfig, token: AuthToken, path: String) async throws -> [RemoteFileEntry] {
         var components = URLComponents(url: peer.baseURL.appendingPathComponent("directories"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "path", value: path)]
@@ -78,9 +89,27 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
             throw FerryError.peerOffline(host: peer.host, port: peer.port)
+        }
+
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            let message = String(decoding: data, as: UTF8.self)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            switch statusCode {
+            case 401:
+                throw FerryError.invalidToken
+            case 403:
+                throw FerryError.permissionDenied(message)
+            case 404:
+                throw FerryError.pathMissing(message)
+            default:
+                throw FerryError.permissionDenied(message.isEmpty ? "HTTP \(statusCode ?? 0)" : message)
+            }
         }
         return data
     }
