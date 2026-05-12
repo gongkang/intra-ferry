@@ -15,6 +15,7 @@ Use a Finder-like two-column workspace:
 - Window title remains `Ferry 传输`.
 - The top summary row shows the peer identity and connection status, such as `目标电脑 · 192.168.214.71:49491`.
 - The peer identity in the transfer window is read-only status text, not an input. Peer host and port are edited only in the settings window.
+- The right side of the top summary row shows an online/offline status badge and a settings button. Directory refresh does not live here; it belongs in the path bar.
 - The main workspace is split into a narrow left rail and a directory browser.
 - The left rail lists simple destinations: receive roots, recent targets, and the selected target summary when available.
 - The directory browser is the main area and receives most of the window space.
