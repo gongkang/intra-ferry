@@ -13,7 +13,7 @@ The first version focuses on a two-Mac workflow:
 - Sender-side remote path selection.
 - Large file and folder transfer with progress, chunking, retry, and basic validation.
 - Automatic bidirectional clipboard sync.
-- Simple prototype-grade security, with protocol fields reserved for later pairing and authentication.
+- Prototype-grade security with a required shared token and protocol fields reserved for later pairing and stronger authentication.
 
 The first version intentionally does not include LAN auto-discovery, strict device pairing, Finder extensions, multi-device management polish, or directory sync semantics.
 
@@ -30,7 +30,7 @@ The first version intentionally does not include LAN auto-discovery, strict devi
 - Full Dropbox-like directory synchronization.
 - Finder context menu extension in the first version.
 - Automatic LAN discovery in the first version.
-- Strong security, pairing, or encryption in the prototype.
+- Production-grade security, pairing, or encryption in the prototype.
 - Perfect replication of every private macOS pasteboard type.
 - Cross-platform support in the first version.
 
@@ -48,7 +48,7 @@ Core modules:
 
 The peer service uses an embedded HTTP server for request/response operations such as directory listing, file chunks, task control, and clipboard writes. WebSocket or long polling can be added for richer status updates, but the first version can derive most progress from the sender-side upload loop.
 
-Protocol payloads include `deviceId`, `protocolVersion`, and reserved authentication fields. These fields are present even in the unauthenticated prototype so later security work does not require a protocol rewrite.
+All peer requests include `deviceId`, `protocolVersion`, and a prototype shared token. The receiving service rejects requests with a missing or invalid token. When the peer has a configured hostname or IP address, the receiver also records the expected peer identity and can surface requests from unexpected addresses as suspicious in logs. The shared token is not a production security model, but it prevents unauthenticated LAN clients from casually writing files or clipboard content during prototype use.
 
 ## Peer Configuration
 
@@ -59,6 +59,7 @@ Peer settings:
 - Display name.
 - Hostname or IP address.
 - Port.
+- Shared prototype token.
 - Optional local device name.
 
 Automatic discovery is not part of the first implementation, but `PeerService` should hide the source of peers behind a small interface so manual peers and discovered peers can share the same connection model later.
@@ -72,13 +73,28 @@ When files or folders are dropped, `TransferService` creates a transfer task:
 - For a file, the task records name, size, modification time, target directory, chunk size, and validation metadata.
 - For a folder, the task recursively scans the directory tree and records relative paths, file count, total size, and per-file metadata.
 - Large files are split into fixed-size chunks. A practical default is 16 MB, with the value kept configurable internally.
-- The receiver writes into a temporary transfer directory first. After all files validate successfully, it moves the completed output into the selected destination.
+- The receiver writes into a temporary transfer directory first. The receive-side temporary directory is created inside the selected destination's authorized root, such as `.intra-ferry-tmp/<transferId>`, so the final move stays on the same volume when possible. After all files validate successfully, the receiver moves the completed output into the selected destination.
 - If the destination already contains the same file or folder name, the first version automatically creates a copy name, such as `name copy.ext` or `folder copy`.
 - Interrupted tasks keep enough state to retry from missing or failed chunks.
 
 The first version validates chunk size and transfer completion. Whole-file hashes should be supported for large files where the additional read cost is acceptable. The implementation should leave the validation strategy explicit so faster or stronger modes can be added later.
 
 The receiver writes only where the running macOS user has permission. For reliability under macOS sandbox and privacy rules, the app should expose a receiving-side "authorized receive locations" setting. Remote browsing and writing are limited to those authorized directories and their children.
+
+### Transfer Protocol and Resumption
+
+Each transfer uses stable identifiers so retries are protocol-level behavior, not just a UI action:
+
+- `transferId`: identifies one dropped file or folder task.
+- `fileId`: identifies a file inside the task. For folders, this is derived from a stable relative path plus file metadata.
+- `chunkIndex`: zero-based chunk index within a file.
+- `chunkSize`: agreed chunk size for the task.
+- `chunkChecksum`: checksum for a chunk when available.
+- `fileSize` and optional `fileChecksum`: validation metadata for finalization.
+
+The sender starts by posting a manifest. The receiver creates or loads the task state and returns the chunks it already has. Chunk upload is idempotent: re-uploading the same `transferId`, `fileId`, and `chunkIndex` either verifies the existing chunk or replaces the incomplete chunk. A retry asks the receiver for the current manifest state, skips completed chunks, uploads missing chunks, and then requests finalization.
+
+The receiver finalizes only after every file in the manifest is complete and validated. If finalization fails, the task remains retryable and the temporary directory is kept until the user cancels or a cleanup policy removes expired tasks.
 
 ## Remote Path Browsing
 
@@ -90,6 +106,8 @@ The sender-side path picker uses `RemoteFileBrowser` to ask the peer for directo
 - Manually entering an absolute path if it falls within an authorized receive location.
 
 The first version does not need a full Finder replacement. It only needs to make common paths such as user directories, project folders, and data directories reachable without opening a terminal.
+
+The receiver exposes only authorized receive roots. The first-run flow should guide the user to add at least one receive location on each Mac. If the sender connects to a peer with no authorized roots, the remote path picker shows an actionable empty state: ask the user to open settings on the peer and authorize a receive folder. The sender cannot browse arbitrary absolute paths outside those roots.
 
 ## Clipboard Sync
 
@@ -103,10 +121,12 @@ Supported clipboard content is layered:
 
 - Required: plain text, basic rich text, and URLs.
 - Required: common image representations such as PNG or TIFF.
-- Required best effort: Finder-copied file paths, represented as file-list clipboard data where possible.
+- Required best effort: Finder-copied file URLs as copy operations. The sender uploads the referenced files or folders to a receiver-side clipboard cache, then the receiver writes pasteboard file URLs that point to those local cached copies.
 - Best effort: other serializable pasteboard types that can be safely read and written.
 
 Private application-specific pasteboard formats are not guaranteed to round-trip. The product promise is that common copy/paste workflows work reliably, not that every app-specific pasteboard flavor is perfectly reproduced.
+
+Finder file clipboard sync does not simply forward source-machine paths because those paths usually do not exist on the other Mac. The first version treats Finder file clipboard content as "copy these files to the other Mac's clipboard cache." Cut/move semantics are not supported; if Finder exposes a move operation, Intra Ferry treats it as a copy. Clipboard cache entries should have visible size limits and cleanup rules so large copied files do not accumulate indefinitely.
 
 The menu bar UI includes:
 
@@ -139,9 +159,10 @@ Settings window:
 
 - Local display name.
 - Peer host/IP and port.
+- Shared prototype token.
 - Service port.
 - Authorized receive locations.
-- Temporary transfer directory.
+- Local staging/cache directory for outgoing task metadata and clipboard cache. Receive-side transfer temp directories are created under the target authorized root.
 - Clipboard sync default enabled/disabled state.
 
 Typical file workflow:
@@ -179,13 +200,21 @@ Partial files are kept in temporary task directories until completion. Failed or
 
 ## Security Model
 
-The first version is a trusted-LAN prototype. It does not implement strict authentication or encryption.
+The first version is a trusted-LAN prototype. It does not implement production-grade authentication or encryption, but it does require a shared prototype token for all peer API requests.
+
+Security behavior in the first version:
+
+- Both Macs store the same shared token in settings.
+- The sender includes the token in every request.
+- The receiver rejects missing or invalid tokens before performing directory listing, file writes, task control, or clipboard writes.
+- Clipboard and file-write endpoints never accept unauthenticated requests.
+- The service should bind to the configured service interface and port, and development documentation should recommend using trusted private networks only.
 
 The protocol still includes room for:
 
 - Device identity.
 - Protocol version.
-- Future pairing tokens.
+- Future pairing tokens or certificates.
 - Future per-request authentication.
 
 The app should make this limitation visible in development documentation. It should not present the prototype as safe for hostile or shared networks.
@@ -196,12 +225,14 @@ Local persistence stores:
 
 - Local device configuration.
 - Peer list.
+- Shared prototype token.
 - Authorized receive locations.
 - Clipboard sync enabled state.
 - Active and recent transfer tasks.
 - Chunk completion state for resumable transfers.
+- Clipboard file cache metadata and cleanup timestamps.
 
-Sensitive future fields, such as pairing keys, should be stored in Keychain when they are introduced. Prototype configuration can use a local app support directory.
+The shared prototype token and sensitive future fields, such as pairing keys, should be stored in Keychain. Non-sensitive prototype configuration can use a local app support directory.
 
 ## Testing Strategy
 
@@ -211,6 +242,7 @@ Unit tests:
 - `ClipboardService`: pasteboard type serialization, source markers, loop prevention, unsupported type handling.
 - `PeerService`: peer configuration, URL construction, heartbeat success and timeout handling.
 - `RemoteFileBrowser`: authorized root filtering, path normalization, parent traversal limits.
+- Security request handling: missing token, invalid token, valid token, and mutating endpoint rejection before side effects.
 
 Integration tests:
 
@@ -218,6 +250,7 @@ Integration tests:
 - Transfer a small file, a large chunked file, and a nested folder.
 - Interrupt a transfer and retry it from partial state.
 - Sync text clipboard content through the service boundary using test pasteboard abstractions.
+- Verify that invalid-token requests cannot list directories, write clipboard content, or upload chunks.
 
 Manual acceptance tests on two real Macs:
 
@@ -227,6 +260,7 @@ Manual acceptance tests on two real Macs:
 - Disconnect the network mid-transfer and retry.
 - Copy text on one Mac and paste on the other.
 - Copy an image on one Mac and paste on the other.
+- Copy a file in Finder on one Mac and paste a usable cached copy on the other.
 - Pause clipboard sync and verify remote pasteboard is not changed.
 
 ## First Implementation Scope
@@ -237,6 +271,7 @@ Included:
 
 - Menu bar app shell.
 - Manual peer settings.
+- Shared prototype token.
 - Embedded receiving service.
 - Heartbeat and connection status.
 - Authorized receive locations.
