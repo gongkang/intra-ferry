@@ -17,10 +17,13 @@ final class AppState: ObservableObject {
     @Published var localName = "日常电脑"
     @Published var peerHost = ""
     @Published var peerPort = 49491
+    @Published var peerPortText = "49491"
     @Published var sharedToken = ""
     @Published var authorizedReceivePath = ""
     @Published var remotePath = ""
+    @Published var remoteBrowsePath = ""
     @Published var remoteEntries: [RemoteFileEntry] = []
+    @Published var remoteBrowserStatus = "刷新后选择对端目录"
     @Published var settingsStatus = "填写后点击保存"
     @Published var settingsStatusIsError = false
 
@@ -32,6 +35,7 @@ final class AppState: ObservableObject {
         self.environment = environment
         authorizedReceivePath = Self.defaultAuthorizedReceivePath
         remotePath = Self.defaultAuthorizedReceivePath
+        remoteBrowsePath = Self.defaultAuthorizedReceivePath
     }
 
     func loadAndStartServices() {
@@ -56,21 +60,27 @@ final class AppState: ObservableObject {
         do {
             settingsStatus = "正在保存..."
             settingsStatusIsError = false
+            let validated = try validateSettings()
             let local = LocalDeviceConfig(
                 id: configuration?.localDevice.id ?? UUID(),
-                displayName: localName,
+                displayName: validated.localName,
                 servicePort: 49491
             )
             let peer = try PeerConfig(
                 id: configuration?.peers.first?.id ?? UUID(),
                 displayName: "对端",
-                host: peerHost,
-                port: peerPort,
+                host: validated.peerHost,
+                port: validated.peerPort,
                 tokenKey: "peer.default",
-                localDeviceName: localName
+                localDeviceName: validated.localName
             )
-            let receivePath = normalizedReceivePath()
+            let receivePath = validated.receivePath
             try FileManager.default.createDirectory(atPath: receivePath, withIntermediateDirectories: true)
+            localName = validated.localName
+            peerHost = validated.peerHost
+            peerPort = validated.peerPort
+            peerPortText = String(validated.peerPort)
+            sharedToken = validated.sharedToken
             authorizedReceivePath = receivePath
             let roots = [
                 AuthorizedRoot(id: configuration?.authorizedRoots.first?.id ?? UUID(), displayName: "接收目录", path: receivePath)
@@ -87,7 +97,7 @@ final class AppState: ObservableObject {
             )
 
             try environment.configurationStore.save(config)
-            let token = AuthToken(rawValue: sharedToken)
+            let token = AuthToken(rawValue: validated.sharedToken)
             try environment.secretStore.save(token, for: peer.tokenKey)
             apply(config)
             try startPeerServices(config: config, peer: peer, token: token)
@@ -103,17 +113,43 @@ final class AppState: ObservableObject {
 
     func refreshRemotePath() async {
         guard let peer = configuration?.peers.first else {
+            remoteBrowserStatus = "请先保存设置"
             return
         }
 
         do {
             guard let token = try environment.secretStore.load(for: peer.tokenKey) else {
+                remoteBrowserStatus = "请先保存共享口令"
                 return
             }
-            remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: remotePath)
+            let path = normalizedRemoteBrowsePath()
+            remoteBrowsePath = path
+            remoteBrowserStatus = "正在加载..."
+            remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: path)
+            remoteBrowserStatus = remoteEntries.isEmpty ? "当前目录为空" : "已加载 \(remoteEntries.count) 项"
         } catch {
-            transferSummary = "浏览对端目录失败：\(userFacingMessage(for: error))"
+            remoteEntries = []
+            remoteBrowserStatus = "浏览失败：\(userFacingMessage(for: error))"
         }
+    }
+
+    func enterRemoteDirectory(_ entry: RemoteFileEntry) async {
+        guard entry.isDirectory else {
+            return
+        }
+
+        remoteBrowsePath = entry.path
+        await refreshRemotePath()
+    }
+
+    func browseRemoteParent() async {
+        remoteBrowsePath = parentPath(for: normalizedRemoteBrowsePath())
+        await refreshRemotePath()
+    }
+
+    func selectRemoteBrowsePath() {
+        remotePath = normalizedRemoteBrowsePath()
+        transferSummary = "发送目标：\(remotePath)"
     }
 
     func sendDroppedFiles(_ urls: [URL]) async {
@@ -142,8 +178,10 @@ final class AppState: ObservableObject {
         localName = config.localDevice.displayName
         peerHost = config.peers.first?.host ?? ""
         peerPort = config.peers.first?.port ?? 49491
+        peerPortText = String(peerPort)
         authorizedReceivePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
         remotePath = config.authorizedRoots.first?.path ?? Self.defaultAuthorizedReceivePath
+        remoteBrowsePath = remotePath
     }
 
     private func startPeerServices(config: AppConfiguration, peer: PeerConfig, token: AuthToken) throws {
@@ -216,8 +254,91 @@ final class AppState: ObservableObject {
         FileManager.default.homeDirectoryForCurrentUser.path
     }
 
-    private func normalizedReceivePath() -> String {
-        let trimmedPath = authorizedReceivePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedPath.isEmpty ? Self.defaultAuthorizedReceivePath : trimmedPath
+    private func normalizedRemoteBrowsePath() -> String {
+        let trimmedPath = remoteBrowsePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedPath.isEmpty ? remotePath : trimmedPath
+    }
+
+    private func parentPath(for path: String) -> String {
+        let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard standardizedPath != "/" else {
+            return "/"
+        }
+
+        let parent = URL(fileURLWithPath: standardizedPath).deletingLastPathComponent().path
+        return parent.isEmpty ? "/" : parent
+    }
+
+    private func validateSettings() throws -> ValidatedSettings {
+        let trimmedLocalName = localName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLocalName.isEmpty else {
+            throw SettingsValidationError.emptyLocalName
+        }
+
+        let trimmedPeerHost = peerHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPeerHost.isEmpty else {
+            throw SettingsValidationError.emptyPeerHost
+        }
+
+        let trimmedPeerPort = peerPortText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPeerPort.isEmpty else {
+            throw SettingsValidationError.emptyPeerPort
+        }
+
+        guard let parsedPort = Int(trimmedPeerPort), (1...65535).contains(parsedPort) else {
+            throw SettingsValidationError.invalidPeerPort
+        }
+
+        let trimmedSharedToken = sharedToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSharedToken.isEmpty else {
+            throw SettingsValidationError.emptySharedToken
+        }
+
+        let trimmedReceivePath = authorizedReceivePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedReceivePath.isEmpty else {
+            throw SettingsValidationError.emptyReceivePath
+        }
+
+        return ValidatedSettings(
+            localName: trimmedLocalName,
+            peerHost: trimmedPeerHost,
+            peerPort: parsedPort,
+            sharedToken: trimmedSharedToken,
+            receivePath: trimmedReceivePath
+        )
+    }
+}
+
+private struct ValidatedSettings {
+    var localName: String
+    var peerHost: String
+    var peerPort: Int
+    var sharedToken: String
+    var receivePath: String
+}
+
+private enum SettingsValidationError: LocalizedError {
+    case emptyLocalName
+    case emptyPeerHost
+    case emptyPeerPort
+    case invalidPeerPort
+    case emptySharedToken
+    case emptyReceivePath
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyLocalName:
+            return "本机名称不能为空。"
+        case .emptyPeerHost:
+            return "对端地址不能为空。"
+        case .emptyPeerPort:
+            return "对端端口不能为空。"
+        case .invalidPeerPort:
+            return "对端端口必须是 1 到 65535 之间的数字。"
+        case .emptySharedToken:
+            return "共享口令不能为空。"
+        case .emptyReceivePath:
+            return "允许接收路径不能为空。"
+        }
     }
 }

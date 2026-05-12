@@ -16,6 +16,6 @@ struct TransferWindowView: View {
             TaskRowView(name: state.transferSummary, progress: state.transferProgress)
         }
         .padding()
-        .frame(width: 560, height: 420)
+        .frame(width: 680, height: 540)
     }
 }

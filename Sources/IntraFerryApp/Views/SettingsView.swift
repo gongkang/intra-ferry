@@ -7,7 +7,7 @@ struct SettingsView: View {
         Form {
             TextField("本机名称", text: $state.localName)
             TextField("对端地址", text: $state.peerHost)
-            TextField("对端端口", text: peerPortText)
+            TextField("对端端口", text: $state.peerPortText)
             SecureField("共享口令", text: $state.sharedToken)
             TextField("允许接收路径", text: $state.authorizedReceivePath)
             Toggle("默认启用剪贴板同步", isOn: $state.clipboardSyncEnabled)
@@ -22,17 +22,5 @@ struct SettingsView: View {
         }
         .padding()
         .frame(width: 460)
-    }
-
-    private var peerPortText: Binding<String> {
-        Binding(
-            get: {
-                String(state.peerPort)
-            },
-            set: { value in
-                let digits = value.filter(\.isNumber)
-                state.peerPort = Int(digits) ?? 0
-            }
-        )
     }
 }
