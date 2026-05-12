@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        NSApp.activate(ignoringOtherApps: true)
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
@@ -41,7 +42,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         )
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        bringPopoverToFront(popover)
         self.popover = popover
+    }
+
+    private func bringPopoverToFront(_ popover: NSPopover) {
+        guard let window = popover.contentViewController?.view.window else {
+            Task { @MainActor [weak self, weak popover] in
+                guard let self, let popover else {
+                    return
+                }
+                self.bringPopoverToFront(popover)
+            }
+            return
+        }
+
+        window.level = .statusBar
+        window.collectionBehavior.insert(.transient)
+        window.orderFrontRegardless()
     }
 
     private func showTransferWindow() {
