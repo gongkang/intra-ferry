@@ -17,7 +17,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "IntraFerryApp",
-            dependencies: ["IntraFerryCore"]
+            dependencies: ["IntraFerryCore"],
+            exclude: ["Resources/Info.plist"]
         ),
         .testTarget(
             name: "IntraFerryCoreTests",

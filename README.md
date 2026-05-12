@@ -15,3 +15,12 @@ Build:
 ```bash
 swift build
 ```
+
+## Packaging
+
+Build a local macOS app bundle:
+
+```bash
+scripts/package-macos-app.sh
+open build/IntraFerry.app
+```
