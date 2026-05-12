@@ -54,25 +54,34 @@ Sources/
       URLSessionPeerClient.swift
     HTTP/
       HTTPMessage.swift
+      HTTPBodyReader.swift
       NetworkHTTPServer.swift
+      PeerHTTPHandler.swift
     Clipboard/
       PasteboardClient.swift
       ClipboardSerializer.swift
       ClipboardFileCache.swift
       ClipboardService.swift
+      ClipboardSyncService.swift
     Runtime/
       AppEnvironment.swift
+      PeerServiceRuntime.swift
   IntraFerryApp/
     main.swift
     IntraFerryApp.swift
     AppDelegate.swift
     AppState.swift
+    Resources/
+      Info.plist
     Views/
       MenuBarContentView.swift
       SettingsView.swift
       TransferWindowView.swift
       RemotePathPickerView.swift
       TaskRowView.swift
+      DropZoneView.swift
+scripts/
+  package-macos-app.sh
 Tests/
   IntraFerryCoreTests/
     TestSupport/
@@ -86,9 +95,11 @@ Tests/
     FileTransferReceiverTests.swift
     PeerRouterTests.swift
     HTTPMessageTests.swift
+    PeerHTTPHandlerTests.swift
     ClipboardSerializerTests.swift
     ClipboardFileCacheTests.swift
     ClipboardServiceTests.swift
+    ClipboardSyncServiceTests.swift
     LocalPeerIntegrationTests.swift
 docs/
   manual-testing.md
@@ -101,10 +112,10 @@ Responsibilities:
 - `Paths/`: Authorized root enforcement and remote directory listing.
 - `Transfer/`: Manifest creation, chunk planning, idempotent chunk writes, finalization, retry, and sender coordination.
 - `Peer/`: Authenticated request routing and peer client protocol.
-- `HTTP/`: Minimal HTTP parser/serializer and Network.framework server adapter.
+- `HTTP/`: Minimal HTTP parser/serializer, reliable request-body reader, Network.framework server adapter, and route bridge to `PeerRouter`.
 - `Clipboard/`: Pasteboard abstraction, serialization, loop prevention, and file clipboard cache.
-- `Runtime/`: Dependency assembly for app startup.
-- `IntraFerryApp/`: macOS menu bar, settings, transfer window, and UI state only.
+- `Runtime/`: Dependency assembly and peer service lifecycle.
+- `IntraFerryApp/`: macOS menu bar, settings, transfer window, drag/drop, and UI state only.
 
 ## Task 1: SwiftPM Scaffold
 
@@ -1332,6 +1343,32 @@ final class FileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(finalURL.path, root.appendingPathComponent("Project").path)
         XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("Project/Sources/main.swift")), "code")
     }
+
+    func testFinalizationRenamesWhenDestinationExists() throws {
+        let temp = try TemporaryDirectory()
+        let root = temp.url.appendingPathComponent("Inbox")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: root.appendingPathComponent("hello.txt"))
+        let receiver = FileTransferReceiver(
+            pathService: AuthorizedPathService(roots: [AuthorizedRoot(id: UUID(), displayName: "Inbox", path: root.path)]),
+            store: TransferReceiverStore(baseDirectory: root.appendingPathComponent(".intra-ferry-tmp"))
+        )
+        let transferId = UUID()
+        let manifest = TransferManifest(
+            transferId: transferId,
+            destinationPath: root.path,
+            rootName: "hello.txt",
+            files: [TransferFileManifest(fileId: "hello", relativePath: "hello.txt", size: 3, chunkCount: 1)],
+            chunkSize: 3
+        )
+
+        try receiver.prepare(manifest)
+        try receiver.writeChunk(transferId: transferId, fileId: "hello", chunkIndex: 0, data: Data("new".utf8))
+        let finalURL = try receiver.finalize(transferId: transferId)
+
+        XCTAssertEqual(finalURL.lastPathComponent, "hello copy.txt")
+        XCTAssertEqual(try String(contentsOf: finalURL), "new")
+    }
 }
 ```
 
@@ -1452,7 +1489,9 @@ public final class FileTransferReceiver: @unchecked Sendable {
         }
         let destination = URL(fileURLWithPath: state.manifest.destinationPath)
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-        let outputURL = destination.appendingPathComponent(state.manifest.rootName)
+        let existingNames = Set((try? fileManager.contentsOfDirectory(atPath: destination.path)) ?? [])
+        let outputName = ConflictResolver(existingNames: existingNames).availableName(for: state.manifest.rootName)
+        let outputURL = destination.appendingPathComponent(outputName)
 
         for file in state.manifest.files {
             let isSingleRootFile = state.manifest.files.count == 1 && file.relativePath == state.manifest.rootName
@@ -1660,10 +1699,11 @@ git add Sources/IntraFerryCore/Peer Tests/IntraFerryCoreTests/PeerRouterTests.sw
 git commit -m "feat: authenticate peer routes"
 ```
 
-## Task 8: HTTP Message Layer and Network Server
+## Task 8: HTTP Message Layer and Reliable Network Server
 
 **Files:**
 - Create: `Sources/IntraFerryCore/HTTP/HTTPMessage.swift`
+- Create: `Sources/IntraFerryCore/HTTP/HTTPBodyReader.swift`
 - Create: `Sources/IntraFerryCore/HTTP/NetworkHTTPServer.swift`
 - Create: `Sources/IntraFerryCore/Peer/PeerClient.swift`
 - Create: `Sources/IntraFerryCore/Peer/URLSessionPeerClient.swift`
@@ -1697,6 +1737,14 @@ final class HTTPMessageTests: XCTestCase {
         XCTAssertTrue(text.hasPrefix("HTTP/1.1 200 OK\r\n"))
         XCTAssertTrue(text.contains("Content-Length: 2\r\n"))
         XCTAssertTrue(text.hasSuffix("\r\n\r\n{}"))
+    }
+
+    func testReadsBodyUsingContentLength() throws {
+        let raw = Data("PUT /chunk HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloEXTRA".utf8)
+
+        let request = try HTTPRequest.parse(raw)
+
+        XCTAssertEqual(request.body, Data("hello".utf8))
     }
 }
 ```
@@ -1733,7 +1781,8 @@ public struct HTTPRequest: Equatable, Sendable {
             throw FerryError.pathMissing("Invalid HTTP request")
         }
         let headData = data[..<marker.lowerBound]
-        let body = data[marker.upperBound...]
+        let headEnd = marker.upperBound
+        let bodyData = data[headEnd...]
         let lines = String(decoding: headData, as: UTF8.self).split(separator: "\r\n", omittingEmptySubsequences: false)
         guard let requestLine = lines.first else {
             throw FerryError.pathMissing("Missing request line")
@@ -1749,7 +1798,11 @@ public struct HTTPRequest: Equatable, Sendable {
                 headers[String(pieces[0])] = pieces[1].trimmingCharacters(in: .whitespaces)
             }
         }
-        return HTTPRequest(method: String(parts[0]), path: String(parts[1]), headers: headers, body: Data(body))
+        let contentLength = Int(headers["Content-Length"] ?? "0") ?? 0
+        guard bodyData.count >= contentLength else {
+            throw FerryError.pathMissing("HTTP body shorter than Content-Length")
+        }
+        return HTTPRequest(method: String(parts[0]), path: String(parts[1]), headers: headers, body: Data(bodyData.prefix(contentLength)))
     }
 }
 
@@ -1790,7 +1843,62 @@ public struct HTTPResponse: Equatable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Implement peer client protocol and URLSession client**
+- [ ] **Step 4: Implement a reliable HTTP body reader**
+
+Create `Sources/IntraFerryCore/HTTP/HTTPBodyReader.swift`:
+
+```swift
+import Foundation
+import Network
+
+public final class HTTPBodyReader: @unchecked Sendable {
+    public init() {}
+
+    public func readRequest(from connection: NWConnection, maximumBytes: Int = 64 * 1024 * 1024) async throws -> Data {
+        var buffer = Data()
+        while true {
+            let chunk = try await receiveChunk(from: connection)
+            buffer.append(chunk)
+            if let expectedLength = expectedRequestLength(buffer), buffer.count >= expectedLength {
+                return Data(buffer.prefix(expectedLength))
+            }
+            if buffer.count > maximumBytes {
+                throw FerryError.diskFull(requiredBytes: Int64(buffer.count), availableBytes: Int64(maximumBytes))
+            }
+        }
+    }
+
+    private func expectedRequestLength(_ data: Data) -> Int? {
+        let delimiter = Data("\r\n\r\n".utf8)
+        guard let headerRange = data.range(of: delimiter) else { return nil }
+        let headerData = data[..<headerRange.lowerBound]
+        let headerText = String(decoding: headerData, as: UTF8.self)
+        let contentLength = headerText
+            .split(separator: "\r\n")
+            .first { $0.lowercased().hasPrefix("content-length:") }
+            .flatMap { Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+        return headerRange.upperBound + contentLength
+    }
+
+    private func receiveChunk(from connection: NWConnection) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let data, !data.isEmpty {
+                    continuation.resume(returning: data)
+                } else if isComplete {
+                    continuation.resume(throwing: FerryError.pathMissing("Connection closed before full HTTP request"))
+                } else {
+                    continuation.resume(returning: Data())
+                }
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Implement peer client protocol and URLSession client**
 
 Create `Sources/IntraFerryCore/Peer/PeerClient.swift`:
 
@@ -1820,7 +1928,7 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
     }
 
     public func listDirectory(peer: PeerConfig, token: AuthToken, path: String) async throws -> [RemoteFileEntry] {
-        var components = URLComponents(url: peer.baseURL.appendingPathComponent("/directories"), resolvingAgainstBaseURL: false)!
+        var components = URLComponents(url: peer.baseURL.appendingPathComponent("directories"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "path", value: path)]
         let data = try await data(for: components.url!, peer: peer, token: token, method: "GET", body: nil)
         return try decoder.decode([RemoteFileEntry].self, from: data)
@@ -1828,16 +1936,16 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
 
     public func prepareTransfer(peer: PeerConfig, token: AuthToken, manifest: TransferManifest) async throws {
         let body = try encoder.encode(manifest)
-        _ = try await data(for: peer.baseURL.appendingPathComponent("/transfers"), peer: peer, token: token, method: "POST", body: body)
+        _ = try await data(for: peer.baseURL.appendingPathComponent("transfers"), peer: peer, token: token, method: "POST", body: body)
     }
 
     public func uploadChunk(peer: PeerConfig, token: AuthToken, transferId: UUID, fileId: String, chunkIndex: Int, data: Data) async throws {
-        let url = peer.baseURL.appendingPathComponent("/transfers/\(transferId.uuidString)/files/\(fileId)/chunks/\(chunkIndex)")
+        let url = peer.baseURL.appendingPathComponent("transfers/\(transferId.uuidString)/files/\(fileId)/chunks/\(chunkIndex)")
         _ = try await self.data(for: url, peer: peer, token: token, method: "PUT", body: data)
     }
 
     public func finalizeTransfer(peer: PeerConfig, token: AuthToken, transferId: UUID) async throws -> String {
-        let data = try await data(for: peer.baseURL.appendingPathComponent("/transfers/\(transferId.uuidString)/finalize"), peer: peer, token: token, method: "POST", body: nil)
+        let data = try await data(for: peer.baseURL.appendingPathComponent("transfers/\(transferId.uuidString)/finalize"), peer: peer, token: token, method: "POST", body: nil)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -1846,6 +1954,7 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
         request.httpMethod = method
         request.setValue(IntraFerryCore.protocolVersion, forHTTPHeaderField: "X-Intra-Ferry-Protocol")
         request.setValue(peer.localDeviceName, forHTTPHeaderField: "X-Intra-Ferry-Device-Name")
+        request.setValue(peer.id.uuidString, forHTTPHeaderField: "X-Intra-Ferry-Device-Id")
         request.setValue(token.rawValue, forHTTPHeaderField: "X-Intra-Ferry-Token")
         request.httpBody = body
         let (data, response) = try await session.data(for: request)
@@ -1857,7 +1966,7 @@ public final class URLSessionPeerClient: PeerClient, @unchecked Sendable {
 }
 ```
 
-- [ ] **Step 5: Add a Network.framework server adapter skeleton**
+- [ ] **Step 6: Add a Network.framework server adapter**
 
 Create `Sources/IntraFerryCore/HTTP/NetworkHTTPServer.swift`:
 
@@ -1870,6 +1979,7 @@ public final class NetworkHTTPServer: @unchecked Sendable {
 
     private let port: NWEndpoint.Port
     private let handler: Handler
+    private let bodyReader = HTTPBodyReader()
     private var listener: NWListener?
 
     public init(port: UInt16, handler: @escaping Handler) {
@@ -1879,24 +1989,19 @@ public final class NetworkHTTPServer: @unchecked Sendable {
 
     public func start() throws {
         let listener = try NWListener(using: .tcp, on: port)
-        listener.newConnectionHandler = { [handler] connection in
+        listener.newConnectionHandler = { [handler, bodyReader] connection in
             connection.start(queue: .global())
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024 * 1024) { data, _, _, _ in
-                guard let data else {
+            Task {
+                let response: HTTPResponse
+                do {
+                    let data = try await bodyReader.readRequest(from: connection)
+                    response = await handler(try HTTPRequest.parse(data))
+                } catch {
+                    response = HTTPResponse(statusCode: 400, headers: [:], body: Data(String(describing: error).utf8))
+                }
+                connection.send(content: response.serialize(), completion: .contentProcessed { _ in
                     connection.cancel()
-                    return
-                }
-                Task {
-                    let response: HTTPResponse
-                    do {
-                        response = await handler(try HTTPRequest.parse(data))
-                    } catch {
-                        response = HTTPResponse(statusCode: 400, headers: [:], body: Data(String(describing: error).utf8))
-                    }
-                    connection.send(content: response.serialize(), completion: .contentProcessed { _ in
-                        connection.cancel()
-                    })
-                }
+                })
             }
         }
         listener.start(queue: .global())
@@ -1910,7 +2015,7 @@ public final class NetworkHTTPServer: @unchecked Sendable {
 }
 ```
 
-- [ ] **Step 6: Verify HTTP tests and build pass**
+- [ ] **Step 7: Verify HTTP tests and build pass**
 
 Run:
 
@@ -1926,11 +2031,204 @@ Test Suite 'HTTPMessageTests' passed
 Build complete
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add Sources/IntraFerryCore/HTTP Sources/IntraFerryCore/Peer/PeerClient.swift Sources/IntraFerryCore/Peer/URLSessionPeerClient.swift Tests/IntraFerryCoreTests/HTTPMessageTests.swift
 git commit -m "feat: add peer HTTP transport"
+```
+
+## Task 8A: Peer HTTP Route Bridge
+
+**Files:**
+- Create: `Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift`
+- Create: `Tests/IntraFerryCoreTests/PeerHTTPHandlerTests.swift`
+
+- [ ] **Step 1: Write route bridge tests**
+
+Create `Tests/IntraFerryCoreTests/PeerHTTPHandlerTests.swift`:
+
+```swift
+import XCTest
+@testable import IntraFerryCore
+
+final class PeerHTTPHandlerTests: XCTestCase {
+    func testDirectoryRouteRejectsInvalidToken() async throws {
+        let temp = try TemporaryDirectory()
+        let root = temp.url.appendingPathComponent("Inbox")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let router = PeerRouter(
+            localDeviceId: UUID(),
+            expectedToken: AuthToken(rawValue: "secret"),
+            browser: LocalRemoteFileBrowser(pathService: AuthorizedPathService(roots: [
+                AuthorizedRoot(id: UUID(), displayName: "Inbox", path: root.path)
+            ])),
+            receiver: nil
+        )
+        let handler = PeerHTTPHandler(router: router)
+        let request = HTTPRequest(
+            method: "GET",
+            path: "/directories?path=\(root.path)",
+            headers: [
+                "X-Intra-Ferry-Protocol": "1",
+                "X-Intra-Ferry-Device-Id": UUID().uuidString,
+                "X-Intra-Ferry-Token": "wrong"
+            ],
+            body: Data()
+        )
+
+        let response = await handler.handle(request)
+
+        XCTAssertEqual(response.statusCode, 401)
+    }
+
+    func testDirectoryRouteListsAuthorizedPath() async throws {
+        let temp = try TemporaryDirectory()
+        let root = temp.url.appendingPathComponent("Inbox")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("ok".utf8).write(to: root.appendingPathComponent("ok.txt"))
+        let router = PeerRouter(
+            localDeviceId: UUID(),
+            expectedToken: AuthToken(rawValue: "secret"),
+            browser: LocalRemoteFileBrowser(pathService: AuthorizedPathService(roots: [
+                AuthorizedRoot(id: UUID(), displayName: "Inbox", path: root.path)
+            ])),
+            receiver: nil
+        )
+        let handler = PeerHTTPHandler(router: router)
+        let encodedPath = root.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        let request = HTTPRequest(
+            method: "GET",
+            path: "/directories?path=\(encodedPath)",
+            headers: [
+                "X-Intra-Ferry-Protocol": "1",
+                "X-Intra-Ferry-Device-Id": UUID().uuidString,
+                "X-Intra-Ferry-Token": "secret"
+            ],
+            body: Data()
+        )
+
+        let response = await handler.handle(request)
+        let entries = try JSONDecoder().decode([RemoteFileEntry].self, from: response.body)
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(entries.map(\.name), ["ok.txt"])
+    }
+}
+```
+
+- [ ] **Step 2: Run route bridge tests and verify they fail**
+
+Run:
+
+```bash
+swift test --filter PeerHTTPHandlerTests
+```
+
+Expected:
+
+```text
+error: cannot find 'PeerHTTPHandler' in scope
+```
+
+- [ ] **Step 3: Implement the route bridge**
+
+Create `Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift`:
+
+```swift
+import Foundation
+
+public final class PeerHTTPHandler: @unchecked Sendable {
+    private let router: PeerRouter
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    public init(router: PeerRouter) {
+        self.router = router
+    }
+
+    public func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        do {
+            let peerRequest = try peerRequest(from: request)
+            switch (request.method, pathOnly(request.path)) {
+            case ("GET", "/directories"):
+                let path = try queryValue("path", in: request.path)
+                let entries = try router.listDirectory(path: path, request: peerRequest)
+                return try json(entries)
+            case ("POST", "/transfers"):
+                let manifest = try decoder.decode(TransferManifest.self, from: request.body)
+                try router.prepareTransfer(manifest, request: peerRequest)
+                return HTTPResponse(statusCode: 200, headers: [:], body: Data())
+            case ("PUT", let path) where path.contains("/chunks/"):
+                let parts = path.split(separator: "/").map(String.init)
+                let transferId = UUID(uuidString: parts[1])!
+                let fileId = parts[3]
+                let chunkIndex = Int(parts[5])!
+                try router.writeChunk(transferId: transferId, fileId: fileId, chunkIndex: chunkIndex, data: request.body, request: peerRequest)
+                return HTTPResponse(statusCode: 200, headers: [:], body: Data())
+            case ("POST", let path) where path.hasSuffix("/finalize"):
+                let parts = path.split(separator: "/").map(String.init)
+                let transferId = UUID(uuidString: parts[1])!
+                let finalURL = try router.finalizeTransfer(transferId: transferId, request: peerRequest)
+                return HTTPResponse(statusCode: 200, headers: ["Content-Type": "text/plain"], body: Data((finalURL?.path ?? "").utf8))
+            default:
+                return HTTPResponse(statusCode: 404, headers: [:], body: Data("Not found".utf8))
+            }
+        } catch FerryError.invalidToken {
+            return HTTPResponse(statusCode: 401, headers: [:], body: Data("Invalid token".utf8))
+        } catch {
+            return HTTPResponse(statusCode: 400, headers: [:], body: Data(String(describing: error).utf8))
+        }
+    }
+
+    private func peerRequest(from request: HTTPRequest) throws -> PeerRequest {
+        guard let id = request.headers["X-Intra-Ferry-Device-Id"].flatMap(UUID.init(uuidString:)) else {
+            throw FerryError.pathMissing("Missing X-Intra-Ferry-Device-Id")
+        }
+        return PeerRequest(
+            deviceId: id,
+            protocolVersion: request.headers["X-Intra-Ferry-Protocol"] ?? "",
+            token: AuthToken(rawValue: request.headers["X-Intra-Ferry-Token"] ?? "")
+        )
+    }
+
+    private func json<T: Encodable>(_ value: T) throws -> HTTPResponse {
+        HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: try encoder.encode(value))
+    }
+
+    private func pathOnly(_ path: String) -> String {
+        path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    }
+
+    private func queryValue(_ name: String, in path: String) throws -> String {
+        guard let components = URLComponents(string: "http://localhost\(path)"),
+              let value = components.queryItems?.first(where: { $0.name == name })?.value else {
+            throw FerryError.pathMissing("Missing query item \(name)")
+        }
+        return value
+    }
+}
+```
+
+- [ ] **Step 4: Verify route bridge tests pass**
+
+Run:
+
+```bash
+swift test --filter PeerHTTPHandlerTests
+```
+
+Expected:
+
+```text
+Test Suite 'PeerHTTPHandlerTests' passed
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift Tests/IntraFerryCoreTests/PeerHTTPHandlerTests.swift
+git commit -m "feat: bridge peer HTTP routes"
 ```
 
 ## Task 9: Transfer Sender Coordinator
@@ -2423,10 +2721,273 @@ git add Sources/IntraFerryCore/Clipboard/ClipboardFileCache.swift Tests/IntraFer
 git commit -m "feat: cache Finder clipboard files"
 ```
 
+## Task 11A: Clipboard Peer Sync and HTTP Endpoint
+
+**Files:**
+- Create: `Sources/IntraFerryCore/Clipboard/ClipboardSyncService.swift`
+- Modify: `Sources/IntraFerryCore/Peer/PeerClient.swift`
+- Modify: `Sources/IntraFerryCore/Peer/URLSessionPeerClient.swift`
+- Modify: `Sources/IntraFerryCore/Peer/PeerRouter.swift`
+- Modify: `Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift`
+- Modify: `Tests/IntraFerryCoreTests/TestSupport/FakePeerClient.swift`
+- Create: `Tests/IntraFerryCoreTests/ClipboardSyncServiceTests.swift`
+- Modify: `Tests/IntraFerryCoreTests/PeerHTTPHandlerTests.swift`
+
+- [ ] **Step 1: Write clipboard sync tests**
+
+Create `Tests/IntraFerryCoreTests/ClipboardSyncServiceTests.swift`:
+
+```swift
+import XCTest
+@testable import IntraFerryCore
+
+final class ClipboardSyncServiceTests: XCTestCase {
+    func testTickSendsLocalClipboardWhenChanged() async throws {
+        let pasteboard = FakePasteboardClient()
+        pasteboard.items = [ClipboardItem(typeIdentifier: "public.utf8-plain-text", data: Data("hello".utf8))]
+        pasteboard.changeCount = 1
+        let client = FakePeerClient()
+        let localDevice = UUID()
+        let peer = PeerConfig(id: UUID(), displayName: "Task", host: "127.0.0.1", port: 49491, tokenKey: "peer.task", localDeviceName: "Daily")
+        let service = ClipboardSyncService(
+            clipboard: ClipboardService(localDeviceId: localDevice, pasteboard: pasteboard, serializer: ClipboardSerializer(localDeviceId: localDevice)),
+            peer: peer,
+            token: AuthToken(rawValue: "secret"),
+            client: client
+        )
+
+        try await service.tick()
+
+        XCTAssertEqual(await client.sentClipboard?.kind, .text)
+    }
+}
+```
+
+Append this test to `Tests/IntraFerryCoreTests/PeerHTTPHandlerTests.swift`:
+
+```swift
+func testClipboardRouteAppliesEnvelope() async throws {
+    let pasteboard = FakePasteboardClient()
+    let localDevice = UUID()
+    let router = PeerRouter(
+        localDeviceId: localDevice,
+        expectedToken: AuthToken(rawValue: "secret"),
+        browser: LocalRemoteFileBrowser(pathService: AuthorizedPathService(roots: [])),
+        receiver: nil,
+        clipboard: ClipboardService(localDeviceId: localDevice, pasteboard: pasteboard, serializer: ClipboardSerializer(localDeviceId: localDevice))
+    )
+    let handler = PeerHTTPHandler(router: router)
+    let envelope = ClipboardEnvelope(
+        id: UUID(),
+        sourceDeviceId: UUID(),
+        kind: .text,
+        items: [ClipboardItem(typeIdentifier: "public.utf8-plain-text", data: Data("remote".utf8))],
+        createdAt: Date()
+    )
+    let request = HTTPRequest(
+        method: "POST",
+        path: "/clipboard",
+        headers: [
+            "X-Intra-Ferry-Protocol": "1",
+            "X-Intra-Ferry-Device-Id": UUID().uuidString,
+            "X-Intra-Ferry-Token": "secret"
+        ],
+        body: try JSONEncoder().encode(envelope)
+    )
+
+    let response = await handler.handle(request)
+
+    XCTAssertEqual(response.statusCode, 200)
+    XCTAssertEqual(pasteboard.items, envelope.items)
+}
+```
+
+- [ ] **Step 2: Run clipboard sync tests and verify they fail**
+
+Run:
+
+```bash
+swift test --filter ClipboardSyncServiceTests
+swift test --filter PeerHTTPHandlerTests/testClipboardRouteAppliesEnvelope
+```
+
+Expected:
+
+```text
+error: cannot find 'ClipboardSyncService' in scope
+```
+
+- [ ] **Step 3: Extend peer client with clipboard send**
+
+Modify `Sources/IntraFerryCore/Peer/PeerClient.swift`:
+
+```swift
+import Foundation
+
+public protocol PeerClient: Sendable {
+    func listDirectory(peer: PeerConfig, token: AuthToken, path: String) async throws -> [RemoteFileEntry]
+    func prepareTransfer(peer: PeerConfig, token: AuthToken, manifest: TransferManifest) async throws
+    func uploadChunk(peer: PeerConfig, token: AuthToken, transferId: UUID, fileId: String, chunkIndex: Int, data: Data) async throws
+    func finalizeTransfer(peer: PeerConfig, token: AuthToken, transferId: UUID) async throws -> String
+    func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws
+}
+```
+
+Modify `Sources/IntraFerryCore/Peer/URLSessionPeerClient.swift` by adding:
+
+```swift
+public func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws {
+    let body = try encoder.encode(envelope)
+    _ = try await data(for: peer.baseURL.appendingPathComponent("clipboard"), peer: peer, token: token, method: "POST", body: body)
+}
+```
+
+Modify `Tests/IntraFerryCoreTests/TestSupport/FakePeerClient.swift` by adding:
+
+```swift
+var sentClipboard: ClipboardEnvelope?
+
+func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws {
+    sentClipboard = envelope
+}
+```
+
+- [ ] **Step 4: Extend router and HTTP handler with clipboard route**
+
+Modify `Sources/IntraFerryCore/Peer/PeerRouter.swift`:
+
+```swift
+public final class PeerRouter: @unchecked Sendable {
+    private let localDeviceId: UUID
+    private let expectedToken: AuthToken
+    private let browser: RemoteFileBrowsing
+    private let receiver: FileTransferReceiver?
+    private let clipboard: ClipboardService?
+
+    public init(localDeviceId: UUID, expectedToken: AuthToken, browser: RemoteFileBrowsing, receiver: FileTransferReceiver?, clipboard: ClipboardService? = nil) {
+        self.localDeviceId = localDeviceId
+        self.expectedToken = expectedToken
+        self.browser = browser
+        self.receiver = receiver
+        self.clipboard = clipboard
+    }
+
+    public func authenticate(_ request: PeerRequest) throws {
+        guard request.protocolVersion == IntraFerryCore.protocolVersion else {
+            throw FerryError.unsupportedProtocolVersion(request.protocolVersion)
+        }
+        guard request.token == expectedToken else {
+            throw FerryError.invalidToken
+        }
+    }
+
+    public func listDirectory(path: String, request: PeerRequest) throws -> [RemoteFileEntry] {
+        try authenticate(request)
+        return try browser.listDirectory(path: path)
+    }
+
+    public func prepareTransfer(_ manifest: TransferManifest, request: PeerRequest) throws {
+        try authenticate(request)
+        try receiver?.prepare(manifest)
+    }
+
+    public func writeChunk(transferId: UUID, fileId: String, chunkIndex: Int, data: Data, request: PeerRequest) throws {
+        try authenticate(request)
+        try receiver?.writeChunk(transferId: transferId, fileId: fileId, chunkIndex: chunkIndex, data: data)
+    }
+
+    public func finalizeTransfer(transferId: UUID, request: PeerRequest) throws -> URL? {
+        try authenticate(request)
+        return try receiver?.finalize(transferId: transferId)
+    }
+
+    public func applyClipboard(_ envelope: ClipboardEnvelope, request: PeerRequest) throws {
+        try authenticate(request)
+        try clipboard?.applyRemoteEnvelope(envelope)
+    }
+}
+```
+
+Modify `Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift` by adding this switch case before `default`:
+
+```swift
+case ("POST", "/clipboard"):
+    let envelope = try decoder.decode(ClipboardEnvelope.self, from: request.body)
+    try router.applyClipboard(envelope, request: peerRequest)
+    return HTTPResponse(statusCode: 200, headers: [:], body: Data())
+```
+
+- [ ] **Step 5: Implement clipboard sync service**
+
+Create `Sources/IntraFerryCore/Clipboard/ClipboardSyncService.swift`:
+
+```swift
+import Foundation
+
+public final class ClipboardSyncService: @unchecked Sendable {
+    private let clipboard: ClipboardService
+    private let peer: PeerConfig
+    private let token: AuthToken
+    private let client: PeerClient
+    private var timer: Timer?
+
+    public init(clipboard: ClipboardService, peer: PeerConfig, token: AuthToken, client: PeerClient) {
+        self.clipboard = clipboard
+        self.peer = peer
+        self.token = token
+        self.client = client
+    }
+
+    public func start(interval: TimeInterval = 0.5) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { try? await self.tick() }
+        }
+    }
+
+    public func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    public func tick() async throws {
+        guard clipboard.shouldSendCurrentPasteboard() else { return }
+        let envelope = try clipboard.captureLocalEnvelope()
+        guard envelope.kind != .unsupported else { return }
+        try await client.sendClipboard(peer: peer, token: token, envelope: envelope)
+    }
+}
+```
+
+- [ ] **Step 6: Verify clipboard sync tests pass**
+
+Run:
+
+```bash
+swift test --filter ClipboardSyncServiceTests
+swift test --filter PeerHTTPHandlerTests
+```
+
+Expected:
+
+```text
+Test Suite 'ClipboardSyncServiceTests' passed
+Test Suite 'PeerHTTPHandlerTests' passed
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add Sources/IntraFerryCore/Clipboard/ClipboardSyncService.swift Sources/IntraFerryCore/Peer Sources/IntraFerryCore/HTTP/PeerHTTPHandler.swift Tests/IntraFerryCoreTests
+git commit -m "feat: sync clipboard over peer API"
+```
+
 ## Task 12: App Runtime Assembly
 
 **Files:**
 - Create: `Sources/IntraFerryCore/Runtime/AppEnvironment.swift`
+- Create: `Sources/IntraFerryCore/Runtime/PeerServiceRuntime.swift`
 - Replace: `Sources/IntraFerryApp/main.swift`
 - Create: `Sources/IntraFerryApp/IntraFerryApp.swift`
 - Create: `Sources/IntraFerryApp/AppDelegate.swift`
@@ -2443,11 +3004,13 @@ public struct AppEnvironment: Sendable {
     public var configurationStore: ConfigurationStore
     public var secretStore: SecretStore
     public var peerClient: PeerClient
+    public var pasteboard: PasteboardClient
 
-    public init(configurationStore: ConfigurationStore, secretStore: SecretStore, peerClient: PeerClient) {
+    public init(configurationStore: ConfigurationStore, secretStore: SecretStore, peerClient: PeerClient, pasteboard: PasteboardClient) {
         self.configurationStore = configurationStore
         self.secretStore = secretStore
         self.peerClient = peerClient
+        self.pasteboard = pasteboard
     }
 
     public static func production() -> AppEnvironment {
@@ -2456,13 +3019,61 @@ public struct AppEnvironment: Sendable {
         return AppEnvironment(
             configurationStore: FileConfigurationStore(fileURL: support.appendingPathComponent("config.json")),
             secretStore: KeychainSecretStore(),
-            peerClient: URLSessionPeerClient()
+            peerClient: URLSessionPeerClient(),
+            pasteboard: NSPasteboardClient()
         )
     }
 }
 ```
 
-- [ ] **Step 2: Replace the command-line main with a SwiftUI app entry**
+- [ ] **Step 2: Add peer service runtime assembly**
+
+Create `Sources/IntraFerryCore/Runtime/PeerServiceRuntime.swift`:
+
+```swift
+import Foundation
+
+public final class PeerServiceRuntime: @unchecked Sendable {
+    private let server: NetworkHTTPServer
+
+    public init(configuration: AppConfiguration, token: AuthToken, pasteboard: PasteboardClient) {
+        let pathService = AuthorizedPathService(roots: configuration.authorizedRoots)
+        let receiveTempRoot = configuration.authorizedRoots.first
+            .map { URL(fileURLWithPath: $0.path).appendingPathComponent(".intra-ferry-tmp", isDirectory: true) }
+            ?? URL(fileURLWithPath: configuration.stagingDirectoryPath).appendingPathComponent("receive-tasks", isDirectory: true)
+        let receiverStore = TransferReceiverStore(
+            baseDirectory: receiveTempRoot
+        )
+        let receiver = FileTransferReceiver(pathService: pathService, store: receiverStore)
+        let clipboard = ClipboardService(
+            localDeviceId: configuration.localDevice.id,
+            pasteboard: pasteboard,
+            serializer: ClipboardSerializer(localDeviceId: configuration.localDevice.id)
+        )
+        let router = PeerRouter(
+            localDeviceId: configuration.localDevice.id,
+            expectedToken: token,
+            browser: LocalRemoteFileBrowser(pathService: pathService),
+            receiver: receiver,
+            clipboard: clipboard
+        )
+        let handler = PeerHTTPHandler(router: router)
+        self.server = NetworkHTTPServer(port: UInt16(configuration.localDevice.servicePort)) { request in
+            await handler.handle(request)
+        }
+    }
+
+    public func start() throws {
+        try server.start()
+    }
+
+    public func stop() {
+        server.stop()
+    }
+}
+```
+
+- [ ] **Step 3: Replace the command-line main with a SwiftUI app entry**
 
 Replace `Sources/IntraFerryApp/main.swift`:
 
@@ -2489,7 +3100,7 @@ struct IntraFerryApplication: App {
 }
 ```
 
-- [ ] **Step 3: Add menu bar app delegate and app state**
+- [ ] **Step 4: Add menu bar app delegate and app state**
 
 Create `Sources/IntraFerryApp/AppDelegate.swift`:
 
@@ -2516,6 +3127,7 @@ Create `Sources/IntraFerryApp/AppState.swift`:
 
 ```swift
 import Foundation
+import SwiftUI
 import IntraFerryCore
 
 @MainActor
@@ -2527,14 +3139,44 @@ final class AppState: ObservableObject {
     @Published var transferSummary = "No active transfers"
 
     let environment: AppEnvironment
+    private var peerServiceRuntime: PeerServiceRuntime?
 
     init(environment: AppEnvironment) {
         self.environment = environment
     }
+
+    func loadAndStartServices() {
+        do {
+            let config = try environment.configurationStore.load()
+            configuration = config
+            clipboardSyncEnabled = config.clipboardSyncEnabled
+            if let peer = config.peers.first, let token = try environment.secretStore.load(for: peer.tokenKey) {
+                let runtime = PeerServiceRuntime(configuration: config, token: token, pasteboard: environment.pasteboard)
+                try runtime.start()
+                peerServiceRuntime = runtime
+                connectionStatus = "Listening on port \(config.localDevice.servicePort)"
+            }
+        } catch {
+            connectionStatus = "Not configured"
+        }
+    }
 }
 ```
 
-- [ ] **Step 4: Verify app target builds**
+- [ ] **Step 5: Call service startup from the app delegate**
+
+Modify `Sources/IntraFerryApp/AppDelegate.swift`:
+
+```swift
+func applicationDidFinishLaunching(_ notification: Notification) {
+    state.loadAndStartServices()
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    item.button?.title = "Ferry"
+    statusItem = item
+}
+```
+
+- [ ] **Step 6: Verify app target builds**
 
 Run:
 
@@ -2548,7 +3190,7 @@ Expected:
 Build complete
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add Sources/IntraFerryCore/Runtime Sources/IntraFerryApp
@@ -2563,6 +3205,8 @@ git commit -m "feat: assemble macOS app runtime"
 - Create: `Sources/IntraFerryApp/Views/TransferWindowView.swift`
 - Create: `Sources/IntraFerryApp/Views/RemotePathPickerView.swift`
 - Create: `Sources/IntraFerryApp/Views/TaskRowView.swift`
+- Create: `Sources/IntraFerryApp/Views/DropZoneView.swift`
+- Modify: `Sources/IntraFerryApp/AppState.swift`
 - Modify: `Sources/IntraFerryApp/AppDelegate.swift`
 
 - [ ] **Step 1: Add SwiftUI views**
@@ -2605,11 +3249,13 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            TextField("Local name", text: .constant(state.configuration?.localDevice.displayName ?? "Daily Mac"))
-            TextField("Peer host", text: .constant(state.configuration?.peers.first?.host ?? ""))
-            TextField("Peer port", value: .constant(state.configuration?.peers.first?.port ?? 49491), format: .number)
-            SecureField("Shared token", text: .constant(""))
+            TextField("Local name", text: $state.localName)
+            TextField("Peer host", text: $state.peerHost)
+            TextField("Peer port", value: $state.peerPort, format: .number)
+            SecureField("Shared token", text: $state.sharedToken)
+            TextField("Authorized receive path", text: $state.authorizedReceivePath)
             Toggle("Enable clipboard sync by default", isOn: $state.clipboardSyncEnabled)
+            Button("Save") { state.saveSettings() }
         }
         .padding()
         .frame(width: 460)
@@ -2628,12 +3274,11 @@ struct TransferWindowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Transfer").font(.title2)
-            RemotePathPickerView()
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [8]))
-                .overlay(Text("Drop files or folders here"))
-                .frame(height: 160)
-            TaskRowView(name: "No active transfer", progress: 0)
+            RemotePathPickerView(state: state)
+            DropZoneView { urls in
+                Task { await state.sendDroppedFiles(urls) }
+            }
+            TaskRowView(name: state.transferSummary, progress: state.transferProgress)
         }
         .padding()
         .frame(width: 560, height: 420)
@@ -2647,12 +3292,26 @@ Create `Sources/IntraFerryApp/Views/RemotePathPickerView.swift`:
 import SwiftUI
 
 struct RemotePathPickerView: View {
-    @State private var path = ""
+    @ObservedObject var state: AppState
 
     var body: some View {
-        HStack {
-            TextField("Remote path", text: $path)
-            Button("Refresh") {}
+        VStack(alignment: .leading) {
+            HStack {
+                TextField("Remote path", text: $state.remotePath)
+                Button("Refresh") { Task { await state.refreshRemotePath() } }
+            }
+            if state.remoteEntries.isEmpty {
+                Text("No remote entries. Configure an authorized receive location on the peer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                List(state.remoteEntries) { entry in
+                    Button(entry.isDirectory ? "\(entry.name)/" : entry.name) {
+                        if entry.isDirectory { state.remotePath = entry.path }
+                    }
+                }
+                .frame(height: 120)
+            }
         }
     }
 }
@@ -2676,7 +3335,167 @@ struct TaskRowView: View {
 }
 ```
 
-- [ ] **Step 2: Wire the popover and transfer window into the status item**
+Create `Sources/IntraFerryApp/Views/DropZoneView.swift`:
+
+```swift
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct DropZoneView: View {
+    var onDropURLs: ([URL]) -> Void
+    @State private var isTargeted = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(isTargeted ? Color.accentColor : Color.secondary, style: StrokeStyle(lineWidth: 2, dash: [8]))
+            .overlay(Text("Drop files or folders here"))
+            .frame(height: 160)
+            .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
+                Task {
+                    let urls = await loadURLs(from: providers)
+                    await MainActor.run { onDropURLs(urls) }
+                }
+                return true
+            }
+    }
+
+    private func loadURLs(from providers: [NSItemProvider]) async -> [URL] {
+        await withTaskGroup(of: URL?.self) { group in
+            for provider in providers {
+                group.addTask {
+                    guard let item = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier),
+                          let data = item as? Data,
+                          let value = String(data: data, encoding: .utf8) else {
+                        return nil
+                    }
+                    return URL(string: value)
+                }
+            }
+            var urls: [URL] = []
+            for await url in group {
+                if let url { urls.append(url) }
+            }
+            return urls
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Bind app state to settings, remote browsing, and transfer**
+
+Modify `Sources/IntraFerryApp/AppState.swift`:
+
+```swift
+import Foundation
+import SwiftUI
+import IntraFerryCore
+
+@MainActor
+final class AppState: ObservableObject {
+    @Published var configuration: AppConfiguration?
+    @Published var clipboardSyncEnabled = true {
+        didSet {
+            clipboardSyncEnabled ? clipboardSyncService?.start() : clipboardSyncService?.stop()
+        }
+    }
+    @Published var connectionStatus = "Not configured"
+    @Published var latestClipboardStatus = "No clipboard sync yet"
+    @Published var transferSummary = "No active transfers"
+    @Published var transferProgress = 0.0
+    @Published var localName = "Daily Mac"
+    @Published var peerHost = ""
+    @Published var peerPort = 49491
+    @Published var sharedToken = ""
+    @Published var authorizedReceivePath = ""
+    @Published var remotePath = ""
+    @Published var remoteEntries: [RemoteFileEntry] = []
+
+    let environment: AppEnvironment
+    private var peerServiceRuntime: PeerServiceRuntime?
+    private var clipboardSyncService: ClipboardSyncService?
+
+    init(environment: AppEnvironment) {
+        self.environment = environment
+    }
+
+    func loadAndStartServices() {
+        do {
+            let config = try environment.configurationStore.load()
+            apply(config)
+            if let peer = config.peers.first, let token = try environment.secretStore.load(for: peer.tokenKey) {
+                let runtime = PeerServiceRuntime(configuration: config, token: token, pasteboard: environment.pasteboard)
+                try runtime.start()
+                peerServiceRuntime = runtime
+                startClipboardSync(peer: peer, token: token, config: config)
+                connectionStatus = "Listening on port \(config.localDevice.servicePort)"
+            }
+        } catch {
+            connectionStatus = "Not configured"
+        }
+    }
+
+    func saveSettings() {
+        let local = LocalDeviceConfig(id: configuration?.localDevice.id ?? UUID(), displayName: localName, servicePort: 49491)
+        let peer = PeerConfig(id: configuration?.peers.first?.id ?? UUID(), displayName: "Peer", host: peerHost, port: peerPort, tokenKey: "peer.default", localDeviceName: localName)
+        let roots = authorizedReceivePath.isEmpty ? [] : [AuthorizedRoot(id: UUID(), displayName: "Receive", path: authorizedReceivePath)]
+        let staging = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("IntraFerry", isDirectory: true)
+            .path
+        let config = AppConfiguration(localDevice: local, peers: [peer], authorizedRoots: roots, clipboardSyncEnabled: clipboardSyncEnabled, stagingDirectoryPath: staging)
+        do {
+            try environment.configurationStore.save(config)
+            try environment.secretStore.save(AuthToken(rawValue: sharedToken), for: peer.tokenKey)
+            apply(config)
+            connectionStatus = "Saved settings"
+        } catch {
+            connectionStatus = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshRemotePath() async {
+        guard let peer = configuration?.peers.first else { return }
+        do {
+            guard let token = try environment.secretStore.load(for: peer.tokenKey) else { return }
+            remoteEntries = try await environment.peerClient.listDirectory(peer: peer, token: token, path: remotePath)
+        } catch {
+            transferSummary = "Remote browse failed: \(error.localizedDescription)"
+        }
+    }
+
+    func sendDroppedFiles(_ urls: [URL]) async {
+        guard let peer = configuration?.peers.first else { return }
+        do {
+            guard let token = try environment.secretStore.load(for: peer.tokenKey) else { return }
+            transferSummary = "Sending \(urls.count) item(s)"
+            let coordinator = TransferCoordinator(planner: TransferPlanner(), client: environment.peerClient)
+            let result = try await coordinator.send(items: urls, destinationPath: remotePath, peer: peer, token: token)
+            transferProgress = 1.0
+            transferSummary = "Sent to \(result.finalPath)"
+        } catch {
+            transferSummary = "Transfer failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func apply(_ config: AppConfiguration) {
+        configuration = config
+        clipboardSyncEnabled = config.clipboardSyncEnabled
+        localName = config.localDevice.displayName
+        peerHost = config.peers.first?.host ?? ""
+        peerPort = config.peers.first?.port ?? 49491
+        authorizedReceivePath = config.authorizedRoots.first?.path ?? ""
+        remotePath = config.authorizedRoots.first?.path ?? remotePath
+    }
+
+    private func startClipboardSync(peer: PeerConfig, token: AuthToken, config: AppConfiguration) {
+        let clipboard = ClipboardService(localDeviceId: config.localDevice.id, pasteboard: environment.pasteboard, serializer: ClipboardSerializer(localDeviceId: config.localDevice.id))
+        let sync = ClipboardSyncService(clipboard: clipboard, peer: peer, token: token, client: environment.peerClient)
+        if clipboardSyncEnabled { sync.start() }
+        clipboardSyncService = sync
+    }
+}
+```
+
+- [ ] **Step 3: Wire the popover and transfer window into the status item**
 
 Modify `Sources/IntraFerryApp/AppDelegate.swift`:
 
@@ -2693,6 +3512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transferWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        state.loadAndStartServices()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "Ferry"
         item.button?.target = self
@@ -2737,7 +3557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 ```
 
-- [ ] **Step 3: Verify UI target builds**
+- [ ] **Step 4: Verify UI target builds**
 
 Run:
 
@@ -2751,11 +3571,119 @@ Expected:
 Build complete
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add Sources/IntraFerryApp
 git commit -m "feat: add menu bar transfer UI"
+```
+
+## Task 13A: macOS App Bundle Packaging
+
+**Files:**
+- Create: `Sources/IntraFerryApp/Resources/Info.plist`
+- Create: `scripts/package-macos-app.sh`
+- Modify: `README.md`
+
+- [ ] **Step 1: Create app bundle Info.plist**
+
+Create `Sources/IntraFerryApp/Resources/Info.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>IntraFerryApp</string>
+  <key>CFBundleIdentifier</key>
+  <string>local.intraferry.app</string>
+  <key>CFBundleName</key>
+  <string>Intra Ferry</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
+```
+
+- [ ] **Step 2: Create packaging script**
+
+Create `scripts/package-macos-app.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIGURATION="${1:-debug}"
+APP_DIR="$ROOT_DIR/build/IntraFerry.app"
+CONTENTS_DIR="$APP_DIR/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+cd "$ROOT_DIR"
+swift build -c "$CONFIGURATION"
+
+rm -rf "$APP_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+cp ".build/$CONFIGURATION/IntraFerryApp" "$MACOS_DIR/IntraFerryApp"
+cp "Sources/IntraFerryApp/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+chmod +x "$MACOS_DIR/IntraFerryApp"
+
+echo "$APP_DIR"
+```
+
+- [ ] **Step 3: Make the script executable and document packaging**
+
+Run:
+
+```bash
+chmod +x scripts/package-macos-app.sh
+```
+
+Append to `README.md`:
+
+```markdown
+## Packaging
+
+Build a local macOS app bundle:
+
+```bash
+scripts/package-macos-app.sh
+open build/IntraFerry.app
+```
+```
+
+- [ ] **Step 4: Verify packaging**
+
+Run:
+
+```bash
+scripts/package-macos-app.sh
+test -x build/IntraFerry.app/Contents/MacOS/IntraFerryApp
+/usr/libexec/PlistBuddy -c 'Print :LSUIElement' build/IntraFerry.app/Contents/Info.plist
+```
+
+Expected:
+
+```text
+build/IntraFerry.app
+true
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Sources/IntraFerryApp/Resources/Info.plist scripts/package-macos-app.sh README.md
+git commit -m "chore: package macOS menu bar app"
 ```
 
 ## Task 14: Manual Test Document and Full Verification
@@ -2776,6 +3704,7 @@ Create `docs/manual-testing.md`:
 ```bash
 swift test
 swift build
+scripts/package-macos-app.sh
 ```
 
 ## Two-Mac Acceptance
@@ -2812,6 +3741,8 @@ Run:
 ```bash
 swift test
 swift build
+scripts/package-macos-app.sh
+test -x build/IntraFerry.app/Contents/MacOS/IntraFerryApp
 git diff --check
 ```
 
@@ -2820,6 +3751,7 @@ Expected:
 ```text
 Test Suite 'All tests' passed
 Build complete
+build/IntraFerry.app
 ```
 
 `git diff --check` prints no output and exits with code 0.
@@ -2841,13 +3773,16 @@ git commit -m "docs: add manual testing checklist"
 ## Spec Coverage Checklist
 
 - Manual peer configuration: Tasks 2, 3, 12, 13.
-- Shared prototype token: Tasks 2, 3, 7, 8.
+- Shared prototype token: Tasks 2, 3, 7, 8, 8A.
 - Authorized receive locations: Tasks 4, 6, 13.
-- Remote path browsing: Tasks 4, 7, 8, 13.
+- Remote path browsing: Tasks 4, 7, 8, 8A, 13.
 - File and folder transfer: Tasks 5, 6, 9.
 - Chunking and retry state: Tasks 5, 6, 9.
+- HTTP receive service and route bridge: Tasks 8, 8A, 12.
 - Clipboard text/image serialization: Task 10.
+- Clipboard peer sync and endpoint: Task 11A.
 - Finder file clipboard cache: Task 11.
 - Menu bar and transfer window: Tasks 12, 13.
+- macOS app bundle packaging: Task 13A.
 - Structured errors: Tasks 2, 4, 6, 7, 10.
 - Testing and manual acceptance: Tasks 1-14.
