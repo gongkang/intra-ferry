@@ -10,7 +10,15 @@ public struct TransferReceiverState: Codable, Equatable, Sendable {
     }
 }
 
-public final class TransferReceiverStore: @unchecked Sendable {
+public protocol TransferReceiverStoring: Sendable {
+    func taskDirectory(for transferId: UUID) -> URL
+    func chunksDirectory(for transferId: UUID) -> URL
+    func loadState(transferId: UUID) throws -> TransferReceiverState
+    func saveState(_ state: TransferReceiverState) throws
+    func deleteTask(transferId: UUID) throws
+}
+
+public final class TransferReceiverStore: TransferReceiverStoring, @unchecked Sendable {
     public let baseDirectory: URL
 
     public init(baseDirectory: URL) {
@@ -39,5 +47,13 @@ public final class TransferReceiverStore: @unchecked Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
         try data.write(to: directory.appendingPathComponent("state.json"), options: [.atomic])
+    }
+
+    public func deleteTask(transferId: UUID) throws {
+        let directory = taskDirectory(for: transferId)
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: directory)
     }
 }

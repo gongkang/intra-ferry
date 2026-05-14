@@ -2,10 +2,8 @@ import Foundation
 @testable import IntraFerryCore
 
 final actor FakePeerClient: PeerClient {
-    var prepared: TransferManifest?
-    var uploadedChunks: [ChunkDescriptor: Data] = [:]
-    var finalized: UUID?
     var sentClipboard: ClipboardEnvelope?
+    var streamedTransfer: TransferStreamCapture?
 
     func listAuthorizedRoots(peer: PeerConfig, token: AuthToken) async throws -> [AuthorizedRoot] {
         []
@@ -15,27 +13,17 @@ final actor FakePeerClient: PeerClient {
         []
     }
 
-    func prepareTransfer(peer: PeerConfig, token: AuthToken, manifest: TransferManifest) async throws {
-        prepared = manifest
-    }
-
-    func uploadChunk(
-        peer: PeerConfig,
-        token: AuthToken,
-        transferId: UUID,
-        fileId: String,
-        chunkIndex: Int,
-        data: Data
-    ) async throws {
-        uploadedChunks[ChunkDescriptor(fileId: fileId, chunkIndex: chunkIndex, offset: 0, length: data.count)] = data
-    }
-
-    func finalizeTransfer(peer: PeerConfig, token: AuthToken, transferId: UUID) async throws -> String {
-        finalized = transferId
+    func streamTransfer(peer: PeerConfig, token: AuthToken, plan: TransferPlan) async throws -> String {
+        streamedTransfer = TransferStreamCapture(manifest: plan.manifest, chunks: plan.chunks)
         return "/Users/task/inbox"
     }
 
     func sendClipboard(peer: PeerConfig, token: AuthToken, envelope: ClipboardEnvelope) async throws {
         sentClipboard = envelope
     }
+}
+
+struct TransferStreamCapture: Equatable {
+    var manifest: TransferManifest
+    var chunks: [ChunkDescriptor]
 }

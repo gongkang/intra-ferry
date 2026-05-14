@@ -2,7 +2,7 @@ import XCTest
 @testable import IntraFerryCore
 
 final class LocalPeerIntegrationTests: XCTestCase {
-    func testCoordinatorUploadsPlannedChunksAndFinalizes() async throws {
+    func testCoordinatorStreamsPlannedTransferInSingleRequest() async throws {
         let temp = try TemporaryDirectory()
         let file = temp.url.appendingPathComponent("hello.txt")
         try Data("HelloWorld".utf8).write(to: file)
@@ -26,7 +26,8 @@ final class LocalPeerIntegrationTests: XCTestCase {
         )
 
         XCTAssertEqual(result.finalPath, "/Users/task/inbox")
-        XCTAssertEqual(await client.uploadedChunks.count, 2)
-        XCTAssertEqual(await client.finalized, result.transferId)
+        let streamed = await client.streamedTransfer
+        XCTAssertEqual(streamed?.manifest.transferId, result.transferId)
+        XCTAssertEqual(streamed?.chunks.map(\.chunkIndex), [0, 1])
     }
 }

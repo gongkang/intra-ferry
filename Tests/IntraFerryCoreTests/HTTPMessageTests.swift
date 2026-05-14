@@ -27,8 +27,24 @@ final class HTTPMessageTests: XCTestCase {
         XCTAssertTrue(text.hasSuffix("\r\n\r\n{}"))
     }
 
+    func testSerializedResponseAdvertisesConnectionClose() {
+        let response = HTTPResponse(statusCode: 200, headers: [:], body: Data())
+
+        let text = String(decoding: response.serialize(), as: UTF8.self)
+
+        XCTAssertTrue(text.contains("Connection: close\r\n"))
+    }
+
+    func testSerializesForbiddenReasonPhrase() {
+        let response = HTTPResponse(statusCode: 403, headers: [:], body: Data())
+
+        let text = String(decoding: response.serialize(), as: UTF8.self)
+
+        XCTAssertTrue(text.hasPrefix("HTTP/1.1 403 Forbidden\r\n"))
+    }
+
     func testReadsBodyUsingContentLength() throws {
-        let raw = Data("PUT /chunk HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloEXTRA".utf8)
+        let raw = Data("POST /body HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloEXTRA".utf8)
 
         let request = try HTTPRequest.parse(raw)
 

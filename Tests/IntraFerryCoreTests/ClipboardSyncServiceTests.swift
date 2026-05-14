@@ -29,7 +29,8 @@ final class ClipboardSyncServiceTests: XCTestCase {
 
         try await service.tick()
 
-        XCTAssertEqual(await client.sentClipboard?.kind, .text)
+        let sentClipboardKind = await client.sentClipboard?.kind
+        XCTAssertEqual(sentClipboardKind, .text)
     }
 
     func testTickDoesNotEchoRemoteClipboardAppliedByAnotherServiceInstance() async throws {
@@ -71,6 +72,7 @@ final class ClipboardSyncServiceTests: XCTestCase {
         try inboundClipboard.applyRemoteEnvelope(remoteEnvelope)
         try await sync.tick()
 
-        XCTAssertNil(await client.sentClipboard)
+        let sentClipboard = await client.sentClipboard
+        XCTAssertNil(sentClipboard)
     }
 }

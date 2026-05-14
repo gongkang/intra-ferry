@@ -76,31 +76,31 @@ final class ConfigurationStoreTests: XCTestCase {
 
         try store.save(AuthToken(rawValue: "replacement-token"), for: "peer.task-mac")
 
-        XCTAssertEqual(keychain.calls, [.update])
+        XCTAssertEqual(keychain.calls, [RecordingKeychainOperations.Call.update])
     }
 
     func testKeychainSecretStoreSaveAddsMissingToken() throws {
         let keychain = RecordingKeychainOperations(
-            updateStatuses: [errSecItemNotFound],
-            addStatuses: [errSecSuccess]
+            addStatuses: [errSecSuccess],
+            updateStatuses: [errSecItemNotFound]
         )
         let store = KeychainSecretStore(service: "IntraFerryTests", operations: keychain.operations)
 
         try store.save(AuthToken(rawValue: "new-token"), for: "peer.task-mac")
 
-        XCTAssertEqual(keychain.calls, [.update, .add])
+        XCTAssertEqual(keychain.calls, [RecordingKeychainOperations.Call.update, .add])
     }
 
     func testKeychainSecretStoreSaveRetriesUpdateWhenAddFindsDuplicateItem() throws {
         let keychain = RecordingKeychainOperations(
-            updateStatuses: [errSecItemNotFound, errSecSuccess],
-            addStatuses: [errSecDuplicateItem]
+            addStatuses: [errSecDuplicateItem],
+            updateStatuses: [errSecItemNotFound, errSecSuccess]
         )
         let store = KeychainSecretStore(service: "IntraFerryTests", operations: keychain.operations)
 
         try store.save(AuthToken(rawValue: "racing-token"), for: "peer.task-mac")
 
-        XCTAssertEqual(keychain.calls, [.update, .add, .update])
+        XCTAssertEqual(keychain.calls, [RecordingKeychainOperations.Call.update, .add, .update])
     }
 
     func testKeychainSecretStoreSaveThrowsPermissionDeniedForUnhandledStatus() throws {
@@ -112,7 +112,7 @@ final class ConfigurationStoreTests: XCTestCase {
                 return XCTFail("Expected permissionDenied, got \(error)")
             }
         }
-        XCTAssertEqual(keychain.calls, [.update])
+        XCTAssertEqual(keychain.calls, [RecordingKeychainOperations.Call.update])
     }
 }
 

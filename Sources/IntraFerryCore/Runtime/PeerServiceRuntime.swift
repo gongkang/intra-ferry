@@ -25,9 +25,15 @@ public final class PeerServiceRuntime: @unchecked Sendable {
         )
         let handler = PeerHTTPHandler(router: router)
         let port = UInt16(exactly: configuration.localDevice.servicePort) ?? 49491
-        self.server = NetworkHTTPServer(port: port) { request in
-            await handler.handle(request)
-        }
+        self.server = NetworkHTTPServer(
+            port: port,
+            handler: { request in
+                await handler.handle(request)
+            },
+            streamHandler: { request in
+                await handler.handleStream(request)
+            }
+        )
     }
 
     public func start() throws {

@@ -43,19 +43,9 @@ public final class PeerRouter: @unchecked Sendable {
         return authorizedRoots
     }
 
-    public func prepareTransfer(_ manifest: TransferManifest, request: PeerRequest) throws {
+    public func receiveTransferStream(manifest: TransferManifest, decoder: TransferStreamDecoder, request: PeerRequest) async throws -> URL? {
         try authenticate(request)
-        try receiver?.prepare(manifest)
-    }
-
-    public func writeChunk(transferId: UUID, fileId: String, chunkIndex: Int, data: Data, request: PeerRequest) throws {
-        try authenticate(request)
-        try receiver?.writeChunk(transferId: transferId, fileId: fileId, chunkIndex: chunkIndex, data: data)
-    }
-
-    public func finalizeTransfer(transferId: UUID, request: PeerRequest) throws -> URL? {
-        try authenticate(request)
-        return try receiver?.finalize(transferId: transferId)
+        return try await receiver?.receiveStream(manifest: manifest, decoder: decoder)
     }
 
     public func applyClipboard(_ envelope: ClipboardEnvelope, request: PeerRequest) throws {

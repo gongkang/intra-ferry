@@ -105,6 +105,31 @@ final class FileTransferReceiverTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: finalURL), "new")
     }
 
+    func testFinalizationRemovesTemporaryTransferDirectoryAfterSuccess() throws {
+        let temp = try TemporaryDirectory()
+        let root = temp.url.appendingPathComponent("Inbox")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = TransferReceiverStore(baseDirectory: root.appendingPathComponent(".intra-ferry-tmp"))
+        let receiver = FileTransferReceiver(
+            pathService: AuthorizedPathService(roots: [AuthorizedRoot(id: UUID(), displayName: "Inbox", path: root.path)]),
+            store: store
+        )
+        let transferId = UUID()
+        let manifest = TransferManifest(
+            transferId: transferId,
+            destinationPath: root.path,
+            rootName: "done.txt",
+            files: [TransferFileManifest(fileId: "done", relativePath: "done.txt", size: 4, chunkCount: 1)],
+            chunkSize: 4
+        )
+
+        try receiver.prepare(manifest)
+        try receiver.writeChunk(transferId: transferId, fileId: "done", chunkIndex: 0, data: Data("done".utf8))
+        _ = try receiver.finalize(transferId: transferId)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.taskDirectory(for: transferId).path))
+    }
+
     func testRejectsManifestRelativePathEscapingOutputDirectory() throws {
         let temp = try TemporaryDirectory()
         let root = temp.url.appendingPathComponent("Inbox")
@@ -122,10 +147,7 @@ final class FileTransferReceiverTests: XCTestCase {
             chunkSize: 1
         )
 
-        try receiver.prepare(manifest)
-        try receiver.writeChunk(transferId: transferId, fileId: "escape", chunkIndex: 0, data: Data("x".utf8))
-
-        XCTAssertThrowsError(try receiver.finalize(transferId: transferId)) { error in
+        XCTAssertThrowsError(try receiver.prepare(manifest)) { error in
             guard case .pathOutsideAuthorizedRoots = error as? FerryError else {
                 return XCTFail("Expected pathOutsideAuthorizedRoots, got \(error)")
             }

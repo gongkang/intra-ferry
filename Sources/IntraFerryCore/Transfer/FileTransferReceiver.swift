@@ -2,16 +2,34 @@ import Foundation
 
 public final class FileTransferReceiver: @unchecked Sendable {
     private let pathService: AuthorizedPathService
-    private let store: TransferReceiverStore
+    private let store: any TransferReceiverStoring
     private let fileManager: FileManager
 
-    public init(pathService: AuthorizedPathService, store: TransferReceiverStore, fileManager: FileManager = .default) {
+    public init(pathService: AuthorizedPathService, store: any TransferReceiverStoring, fileManager: FileManager = .default) {
         self.pathService = pathService
         self.store = store
         self.fileManager = fileManager
     }
 
     public func prepare(_ manifest: TransferManifest) throws {
+        try store.saveState(try initialState(for: manifest))
+    }
+
+    public func receiveStream(manifest: TransferManifest, decoder: TransferStreamDecoder) async throws -> URL {
+        var state = try initialState(for: manifest)
+        try store.saveState(state)
+
+        while true {
+            switch try await decoder.readFrame() {
+            case let .chunk(fileId, chunkIndex, data):
+                try writeChunk(into: &state, fileId: fileId, chunkIndex: chunkIndex, data: data)
+            case .end:
+                return try finalize(state: state)
+            }
+        }
+    }
+
+    private func initialState(for manifest: TransferManifest) throws -> TransferReceiverState {
         try pathService.requireAuthorized(path: manifest.destinationPath)
         guard manifest.chunkSize > 0 else {
             throw FerryError.pathMissing("Chunk size must be greater than zero.")
@@ -19,11 +37,16 @@ public final class FileTransferReceiver: @unchecked Sendable {
 
         try validateManifestPaths(manifest)
         try fileManager.createDirectory(at: store.chunksDirectory(for: manifest.transferId), withIntermediateDirectories: true)
-        try store.saveState(TransferReceiverState(manifest: manifest, completedChunks: []))
+        return TransferReceiverState(manifest: manifest, completedChunks: [])
     }
 
     public func writeChunk(transferId: UUID, fileId: String, chunkIndex: Int, data: Data) throws {
         var state = try store.loadState(transferId: transferId)
+        try writeChunk(into: &state, fileId: fileId, chunkIndex: chunkIndex, data: data)
+        try store.saveState(state)
+    }
+
+    private func writeChunk(into state: inout TransferReceiverState, fileId: String, chunkIndex: Int, data: Data) throws {
         guard let file = state.manifest.files.first(where: { $0.fileId == fileId }) else {
             throw FerryError.pathMissing("Unknown fileId \(fileId)")
         }
@@ -33,25 +56,28 @@ public final class FileTransferReceiver: @unchecked Sendable {
 
         let descriptor = chunkDescriptor(for: file, chunkIndex: chunkIndex, chunkSize: state.manifest.chunkSize)
         guard data.count == descriptor.length else {
-            throw FerryError.transferIncomplete(transferId)
+            throw FerryError.transferIncomplete(state.manifest.transferId)
         }
 
-        let chunkURL = chunkURL(transferId: transferId, fileId: fileId, chunkIndex: chunkIndex)
+        let chunkURL = chunkURL(transferId: state.manifest.transferId, fileId: fileId, chunkIndex: chunkIndex)
         try fileManager.createDirectory(at: chunkURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: chunkURL, options: [.atomic])
         state.completedChunks.insert(descriptor)
-        try store.saveState(state)
     }
 
     public func missingChunks(transferId: UUID) throws -> [ChunkDescriptor] {
         let state = try store.loadState(transferId: transferId)
-        return expectedChunks(for: state.manifest).filter { !state.completedChunks.contains($0) }
+        return missingChunks(in: state)
     }
 
     public func finalize(transferId: UUID) throws -> URL {
         let state = try store.loadState(transferId: transferId)
-        guard try missingChunks(transferId: transferId).isEmpty else {
-            throw FerryError.transferIncomplete(transferId)
+        return try finalize(state: state)
+    }
+
+    private func finalize(state: TransferReceiverState) throws -> URL {
+        guard missingChunks(in: state).isEmpty else {
+            throw FerryError.transferIncomplete(state.manifest.transferId)
         }
 
         try pathService.requireAuthorized(path: state.manifest.destinationPath)
@@ -68,16 +94,23 @@ public final class FileTransferReceiver: @unchecked Sendable {
             try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             fileManager.createFile(atPath: target.path, contents: nil)
 
-            let handle = try FileHandle(forWritingTo: target)
-            defer { try? handle.close() }
+            do {
+                let handle = try FileHandle(forWritingTo: target)
+                defer { try? handle.close() }
 
-            for index in 0..<file.chunkCount {
-                let data = try Data(contentsOf: chunkURL(transferId: transferId, fileId: file.fileId, chunkIndex: index))
-                try handle.write(contentsOf: data)
+                for index in 0..<file.chunkCount {
+                    let data = try Data(contentsOf: chunkURL(transferId: state.manifest.transferId, fileId: file.fileId, chunkIndex: index))
+                    try handle.write(contentsOf: data)
+                }
             }
         }
 
+        try? store.deleteTask(transferId: state.manifest.transferId)
         return outputURL
+    }
+
+    private func missingChunks(in state: TransferReceiverState) -> [ChunkDescriptor] {
+        expectedChunks(for: state.manifest).filter { !state.completedChunks.contains($0) }
     }
 
     private func expectedChunks(for manifest: TransferManifest) -> [ChunkDescriptor] {

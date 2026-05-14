@@ -36,18 +36,26 @@ public struct TransferPlanner: @unchecked Sendable {
         var sourceFiles: [String: URL] = [:]
         var chunks: [ChunkDescriptor] = []
 
-        for item in items {
-            let itemFiles = try enumerateFiles(item)
+        let plannedItems = try planTopLevelItems(items)
+        for plannedItem in plannedItems {
+            let itemFiles = try enumerateFiles(plannedItem.url)
+            let itemIsDirectory = try isDirectory(plannedItem.url)
             for file in itemFiles {
-                let relativePath = try relativePath(for: file, base: item)
+                let relativePath = try relativePath(for: file, base: plannedItem.url)
+                let destinationRelativePath = destinationRelativePath(
+                    relativePath: relativePath,
+                    topLevelName: plannedItem.topLevelName,
+                    itemIsDirectory: itemIsDirectory,
+                    includeTopLevelName: items.count > 1
+                )
                 let size = try fileSize(file)
-                let fileId = stableFileId(relativePath: relativePath, size: size)
+                let fileId = stableFileId(relativePath: destinationRelativePath, size: size)
                 let chunkCount = Int((size + Int64(chunkSize) - 1) / Int64(chunkSize))
 
                 files.append(
                     TransferFileManifest(
                         fileId: fileId,
-                        relativePath: relativePath,
+                        relativePath: destinationRelativePath,
                         size: size,
                         chunkCount: chunkCount
                     )
@@ -84,13 +92,25 @@ public struct TransferPlanner: @unchecked Sendable {
         )
     }
 
-    private func enumerateFiles(_ url: URL) throws -> [URL] {
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            throw FerryError.pathMissing(url.path)
-        }
+    private struct PlannedTopLevelItem {
+        var url: URL
+        var topLevelName: String
+    }
 
-        if !isDirectory.boolValue {
+    private func planTopLevelItems(_ items: [URL]) throws -> [PlannedTopLevelItem] {
+        var reservedNames = Set<String>()
+        return items.map { item in
+            let topLevelName = ConflictResolver(existingNames: reservedNames)
+                .availableName(for: item.lastPathComponent)
+            reservedNames.insert(topLevelName)
+            return PlannedTopLevelItem(url: item, topLevelName: topLevelName)
+        }
+    }
+
+    private func enumerateFiles(_ url: URL) throws -> [URL] {
+        let isDirectory = try isDirectory(url)
+
+        if !isDirectory {
             return [url]
         }
 
@@ -114,6 +134,15 @@ public struct TransferPlanner: @unchecked Sendable {
         }
     }
 
+    private func isDirectory(_ url: URL) throws -> Bool {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            throw FerryError.pathMissing(url.path)
+        }
+
+        return isDirectory.boolValue
+    }
+
     private func relativePath(for file: URL, base: URL) throws -> String {
         var isDirectory: ObjCBool = false
         fileManager.fileExists(atPath: base.path, isDirectory: &isDirectory)
@@ -129,6 +158,23 @@ public struct TransferPlanner: @unchecked Sendable {
         }
 
         return String(filePath.dropFirst(basePath.count + 1))
+    }
+
+    private func destinationRelativePath(
+        relativePath: String,
+        topLevelName: String,
+        itemIsDirectory: Bool,
+        includeTopLevelName: Bool
+    ) -> String {
+        guard includeTopLevelName else {
+            return relativePath
+        }
+
+        guard itemIsDirectory else {
+            return topLevelName
+        }
+
+        return "\(topLevelName)/\(relativePath)"
     }
 
     private func fileSize(_ url: URL) throws -> Int64 {
