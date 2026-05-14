@@ -17,9 +17,15 @@ public struct TransferPlanner: @unchecked Sendable {
     public var chunkSize: Int
 
     private let fileManager: FileManager
+    private let includesHiddenFiles: Bool
 
-    public init(chunkSize: Int = 16 * 1024 * 1024, fileManager: FileManager = .default) {
+    public init(
+        chunkSize: Int = 16 * 1024 * 1024,
+        includesHiddenFiles: Bool = true,
+        fileManager: FileManager = .default
+    ) {
         self.chunkSize = chunkSize
+        self.includesHiddenFiles = includesHiddenFiles
         self.fileManager = fileManager
     }
 
@@ -117,7 +123,7 @@ public struct TransferPlanner: @unchecked Sendable {
         let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: directoryEnumerationOptions
         )
 
         let files = try enumerator?.compactMap { item -> URL? in
@@ -132,6 +138,10 @@ public struct TransferPlanner: @unchecked Sendable {
         return files.sorted { lhs, rhs in
             lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
         }
+    }
+
+    private var directoryEnumerationOptions: FileManager.DirectoryEnumerationOptions {
+        includesHiddenFiles ? [] : [.skipsHiddenFiles]
     }
 
     private func isDirectory(_ url: URL) throws -> Bool {

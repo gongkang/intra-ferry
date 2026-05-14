@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     @Published var settingsStatus = "填写后点击保存"
     @Published var settingsStatusIsError = false
     @Published var localAddressSummary = "正在检测..."
+    @Published var transferIncludesHiddenFiles = true
 
     let environment: AppEnvironment
     private var peerServiceRuntime: PeerServiceRuntime?
@@ -252,7 +253,8 @@ final class AppState: ObservableObject {
             transferProgress = 0
             lastTransferFailedBecausePeerOffline = false
             transferSummary = "正在发送 \(urls.count) 个项目"
-            let coordinator = TransferCoordinator(planner: TransferPlanner(), client: environment.peerClient)
+            let planner = TransferPlanner(includesHiddenFiles: transferIncludesHiddenFiles)
+            let coordinator = TransferCoordinator(planner: planner, client: environment.peerClient)
             let result = try await coordinator.send(items: urls, destinationPath: destinationPath, peer: peer, token: token)
             transferProgress = 1
             remotePeerReachability = .online

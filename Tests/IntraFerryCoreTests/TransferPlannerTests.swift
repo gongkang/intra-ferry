@@ -30,6 +30,38 @@ final class TransferPlannerTests: XCTestCase {
         XCTAssertEqual(plan.manifest.files.map(\.relativePath), ["Sources/main.swift"])
     }
 
+    func testPlansHiddenFilesByDefault() throws {
+        let temp = try TemporaryDirectory()
+        let folder = temp.url.appendingPathComponent("Project")
+        let gitDirectory = folder.appendingPathComponent(".git")
+        let sourceDirectory = folder.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main".utf8).write(to: gitDirectory.appendingPathComponent("HEAD"))
+        try Data("print(1)".utf8).write(to: sourceDirectory.appendingPathComponent("main.swift"))
+        let planner = TransferPlanner(chunkSize: 16)
+
+        let plan = try planner.plan(items: [folder], destinationPath: "/Users/task/inbox")
+
+        XCTAssertEqual(plan.manifest.files.map(\.relativePath), [".git/HEAD", "Sources/main.swift"])
+    }
+
+    func testCanSkipHiddenFilesWhenPlanningFolder() throws {
+        let temp = try TemporaryDirectory()
+        let folder = temp.url.appendingPathComponent("Project")
+        let gitDirectory = folder.appendingPathComponent(".git")
+        let sourceDirectory = folder.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main".utf8).write(to: gitDirectory.appendingPathComponent("HEAD"))
+        try Data("print(1)".utf8).write(to: sourceDirectory.appendingPathComponent("main.swift"))
+        let planner = TransferPlanner(chunkSize: 16, includesHiddenFiles: false)
+
+        let plan = try planner.plan(items: [folder], destinationPath: "/Users/task/inbox")
+
+        XCTAssertEqual(plan.manifest.files.map(\.relativePath), ["Sources/main.swift"])
+    }
+
     func testPlansMultipleFoldersUnderDistinctTopLevelNames() throws {
         let temp = try TemporaryDirectory()
         let firstProject = temp.url.appendingPathComponent("One/Project")
